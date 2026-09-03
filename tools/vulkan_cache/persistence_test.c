@@ -61,8 +61,6 @@ typedef struct Device
    VkPipelineCache pipeline_cache;
    char pipeline_cache_file_name[96];
    unsigned pipeline_cache_dirty_count;
-   unsigned pipeline_cache_temp_serial;
-   retro_time_t pipeline_cache_last_checkpoint;
    bool pipeline_cache_storage_warned;
    struct
    {
@@ -76,10 +74,15 @@ static char retro_base_directory[4096];
 static char retro_save_directory[4096];
 static retro_time_t mock_time = 1000000;
 static unsigned snapshot_queries, write_opens;
+static unsigned vfs_replace_attempts;
 static bool fail_write, fail_close, fail_replace, fail_read;
 static VkResult import_error, merge_error;
 
 static retro_time_t cpu_features_get_time_usec(void) { return mock_time; }
+
+#ifdef _WIN32
+static wchar_t *utf8_to_utf16_string_alloc(const char *text);
+#endif
 
 static uint32_t encoding_crc32(uint32_t crc, const void *data, size_t size)
 {
@@ -131,7 +134,18 @@ static RFILE *filestream_open(const char *path, unsigned mode, unsigned hint)
    RFILE *result;
    if (mode == RETRO_VFS_FILE_ACCESS_READ && fail_read)
       return NULL;
+#ifdef _WIN32
+   {
+      wchar_t *wide = utf8_to_utf16_string_alloc(path);
+      if (!wide)
+         return NULL;
+      file = _wfopen(wide,
+            mode == RETRO_VFS_FILE_ACCESS_WRITE ? L"wb" : L"rb");
+      free(wide);
+   }
+#else
    file = fopen(path, mode == RETRO_VFS_FILE_ACCESS_WRITE ? "wb" : "rb");
+#endif
    if (!file)
       return NULL;
    result = (RFILE *)malloc(sizeof(*result));
@@ -170,15 +184,20 @@ static int filestream_close(RFILE *file)
    return result;
 }
 
-static int filestream_delete(const char *path) { return remove(path); }
-
-static int test_rename(const char *old_path, const char *new_path)
+static int filestream_delete(const char *path)
 {
-   return fail_replace ? -1 : rename(old_path, new_path);
+#ifdef _WIN32
+   wchar_t *wide = utf8_to_utf16_string_alloc(path);
+   int result = wide ? _wremove(wide) : -1;
+   free(wide);
+   return result;
+#else
+   return remove(path);
+#endif
 }
 
 #ifdef _WIN32
-wchar_t *utf8_to_utf16_string_alloc(const char *text)
+static wchar_t *utf8_to_utf16_string_alloc(const char *text)
 {
    int length = MultiByteToWideChar(CP_UTF8, 0, text, -1, NULL, 0);
    wchar_t *wide = (wchar_t *)malloc((size_t)length * sizeof(*wide));
@@ -190,12 +209,27 @@ wchar_t *utf8_to_utf16_string_alloc(const char *text)
    assert(MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, length));
    return wide;
 }
-
-static BOOL test_move_file_ex(LPCWSTR old_path, LPCWSTR new_path, DWORD flags)
-{
-   return fail_replace ? FALSE : MoveFileExW(old_path, new_path, flags);
-}
 #endif
+
+static int filestream_rename(const char *old_path, const char *new_path)
+{
+   vfs_replace_attempts++;
+   if (fail_replace)
+      return -1;
+#ifdef _WIN32
+   {
+      wchar_t *old_wide = utf8_to_utf16_string_alloc(old_path);
+      wchar_t *new_wide = utf8_to_utf16_string_alloc(new_path);
+      bool replaced = old_wide && new_wide &&
+         MoveFileExW(old_wide, new_wide, MOVEFILE_REPLACE_EXISTING) != 0;
+      free(old_wide);
+      free(new_wide);
+      return replaced ? 0 : -1;
+   }
+#else
+   return rename(old_path, new_path);
+#endif
+}
 
 static VkResult vkCreatePipelineCache(void *device,
       const VkPipelineCacheCreateInfo *info, void *allocator,
@@ -243,16 +277,9 @@ static VkResult vkGetPipelineCacheData(void *device, VkPipelineCache cache,
    return VK_SUCCESS;
 }
 
-/* Exercise production code, including native file locking and replacement. */
-#define rename test_rename
-#ifdef _WIN32
-#define MoveFileExW test_move_file_ex
-#endif
+/* Exercise the common atomic writer and the production persistence code. */
+#include "atomic_write_under_test.h"
 #include "persistence_under_test.h"
-#undef rename
-#ifdef _WIN32
-#undef MoveFileExW
-#endif
 
 static Device make_device(void)
 {
@@ -269,7 +296,6 @@ static Device make_device(void)
    device.pipeline_cache->vendor_id = device.gpu_props.vendorID;
    device.pipeline_cache->device_id = device.gpu_props.deviceID;
    memcpy(device.pipeline_cache->uuid, device.gpu_props.pipelineCacheUUID, VK_UUID_SIZE);
-   device.pipeline_cache_last_checkpoint = mock_time;
    device_pipeline_cache_set_file_name(&device);
    return device;
 }
@@ -315,6 +341,9 @@ static void test_selection_and_updates(const char *tmp)
    device_pipeline_cache_set_file_name(&writer);
    writer.pipeline_cache->entries = 1;
    assert(device_pipeline_cache_write(&writer, retro_base_directory, "system"));
+#ifndef _WIN32
+   assert(vfs_replace_attempts == 1);
+#endif
    writer.pipeline_cache->entries = 2;
    assert(device_pipeline_cache_write(&writer, retro_save_directory, "save"));
    device_pipeline_cache_load(&first);
@@ -330,7 +359,7 @@ static void test_selection_and_updates(const char *tmp)
    free(second.pipeline_cache);
 }
 
-static void test_faults_and_debounce(const char *tmp)
+static void test_faults_and_unchanged_data(const char *tmp)
 {
    Device device = make_device();
    unsigned old_queries, old_writes;
@@ -354,14 +383,6 @@ static void test_faults_and_debounce(const char *tmp)
    fail_close = false;
    assert(device.pipeline_cache_dirty_count == 1);
    assert(disk_entries(&device, retro_base_directory) == 1);
-   old_queries = snapshot_queries;
-   mock_time++;
-   device_pipeline_cache_checkpoint(&device, false);
-   assert(snapshot_queries == old_queries);
-   device.pipeline_cache_dirty_count = 64;
-   mock_time += 5 * 1000000;
-   device_pipeline_cache_checkpoint(&device, false);
-   assert(snapshot_queries == old_queries); /* Busy boot does not accelerate I/O. */
    fail_write = true;
    device_pipeline_cache_save(&device);
    fail_write = false;
@@ -378,8 +399,7 @@ static void test_faults_and_debounce(const char *tmp)
    device_pipeline_cache_save(&device);
    merge_error = 0;
    assert(disk_entries(&device, retro_base_directory) == 1);
-   mock_time += VULKAN_PIPELINE_CACHE_CHECKPOINT_USEC;
-   device_pipeline_cache_checkpoint(&device, false);
+   device_pipeline_cache_save(&device);
    assert(device.pipeline_cache_dirty_count == 0);
    assert(disk_entries(&device, retro_base_directory) == 3);
    free(device.pipeline_cache);
@@ -390,6 +410,10 @@ static void test_lock_and_fallback(const char *tmp)
    Device writer = make_device(), reader = make_device();
    struct RhiPipelineCacheLock lock;
    char path[PATH_MAX_LENGTH];
+#ifndef _WIN32
+   pid_t holder;
+   int holder_release;
+#endif
    new_roots(tmp, 3);
    writer.pipeline_cache->entries = 1;
    assert(device_pipeline_cache_write(&writer, retro_base_directory, "system"));
@@ -424,13 +448,54 @@ static void test_lock_and_fallback(const char *tmp)
       assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
 #endif
    }
+#ifndef _WIN32
+   /* POSIX record locks belong to a process, so a second lock attempt by this
+    * process would succeed. Have another process hold the lock while the
+    * writer exercises the fallback path. */
+   device_pipeline_cache_unlock(&lock);
+   {
+      int ready_pipe[2], release_pipe[2];
+      char signal;
+      assert(pipe(ready_pipe) == 0);
+      assert(pipe(release_pipe) == 0);
+      holder = fork();
+      assert(holder >= 0);
+      if (holder == 0)
+      {
+         struct RhiPipelineCacheLock other;
+         close(ready_pipe[0]);
+         close(release_pipe[1]);
+         if (!device_pipeline_cache_lock(path, &other) ||
+             write(ready_pipe[1], "R", 1) != 1 ||
+             read(release_pipe[0], &signal, 1) != 1)
+            _exit(2);
+         device_pipeline_cache_unlock(&other);
+         _exit(0);
+      }
+      close(ready_pipe[1]);
+      close(release_pipe[0]);
+      assert(read(ready_pipe[0], &signal, 1) == 1);
+      close(ready_pipe[0]);
+      holder_release = release_pipe[1];
+   }
+#endif
    writer.pipeline_cache->entries = 3;
    device_pipeline_cache_mark_dirty(&writer);
    device_pipeline_cache_save(&writer); /* Busy SYSTEM falls back to SAVE. */
    assert(writer.pipeline_cache_dirty_count == 0);
    assert(disk_entries(&writer, retro_base_directory) == 1);
    assert(disk_entries(&writer, retro_save_directory) == 3);
+#ifdef _WIN32
    device_pipeline_cache_unlock(&lock);
+#else
+   {
+      int status;
+      assert(write(holder_release, "X", 1) == 1);
+      close(holder_release);
+      assert(waitpid(holder, &status, 0) == holder);
+      assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+   }
+#endif
    device_pipeline_cache_load(&reader);
    assert(reader.pipeline_cache->entries == 3); /* Stale SYSTEM cannot shadow SAVE. */
    free(writer.pipeline_cache);
@@ -440,7 +505,7 @@ static void test_lock_and_fallback(const char *tmp)
 static void test_validation_and_quarantine(const char *tmp)
 {
    Device device = make_device(), reader = make_device();
-   char path[PATH_MAX_LENGTH];
+   char path[PATH_MAX_LENGTH], rejected_path[PATH_MAX_LENGTH];
    FILE *file;
    size_t size;
    bool failed;
@@ -472,7 +537,28 @@ static void test_validation_and_quarantine(const char *tmp)
    import_error = -3;
    device_pipeline_cache_load(&reader);
    assert(!path_is_valid(path)); /* Rejection under lock moves it aside. */
+   assert(snprintf(rejected_path, sizeof(rejected_path), "%s.rejected", path) > 0);
+   assert(path_is_valid(rejected_path));
+
+   /* A later rejection atomically replaces the one stable quarantine instead
+    * of creating an unbounded series of uniquely named siblings. */
    import_error = 0;
+   device.pipeline_cache->entries = 9;
+   assert(device_pipeline_cache_write(&device, retro_base_directory, "system"));
+   import_error = -3;
+   device_pipeline_cache_load(&reader);
+   assert(!path_is_valid(path) && path_is_valid(rejected_path));
+   import_error = 0;
+   {
+      char rejected_name[128];
+      snprintf(rejected_name, sizeof(rejected_name), "%s.rejected",
+            device.pipeline_cache_file_name);
+      data = device_pipeline_cache_load_path(&device, &size,
+            retro_base_directory, rejected_name, "test", &failed);
+      assert(data && !failed && size == sizeof(struct FakeCache));
+      assert(((struct FakeCache *)data)->entries == 9);
+      free(data);
+   }
    free(device.pipeline_cache);
    free(reader.pipeline_cache);
 }
@@ -575,22 +661,17 @@ static void test_windows_native_paths(const char *tmp)
    assert(file != INVALID_HANDLE_VALUE);
    assert(WriteFile(file, "old", 3, &count, NULL) && count == 3);
    assert(CloseHandle(file));
-   file = CreateFileW(temp_wide, GENERIC_WRITE, FILE_SHARE_READ, NULL,
-         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-   assert(file != INVALID_HANDLE_VALUE);
-   assert(WriteFile(file, "new", 3, &count, NULL) && count == 3);
-   assert(CloseHandle(file));
-   /* A real Windows sharing violation must preserve both destination and
-    * complete temporary. This is not the injected rename-failure path. */
+   /* A real Windows sharing violation must preserve the old destination;
+    * the common helper also removes the failed stable temporary. */
    file = CreateFileW(path_wide, GENERIC_READ, FILE_SHARE_READ, NULL,
          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
    assert(file != INVALID_HANDLE_VALUE);
-   assert(!device_pipeline_cache_replace(temp, path));
+   assert(!filestream_write_file_atomic(path, "new", 3));
    assert(ReadFile(file, bytes, sizeof(bytes), &count, NULL) && count == 3);
    assert(memcmp(bytes, "old", 3) == 0);
-   assert(GetFileAttributesW(temp_wide) != INVALID_FILE_ATTRIBUTES);
+   assert(GetFileAttributesW(temp_wide) == INVALID_FILE_ATTRIBUTES);
    assert(CloseHandle(file));
-   assert(device_pipeline_cache_replace(temp, path));
+   assert(filestream_write_file_atomic(path, "new", 3));
    assert(GetFileAttributesW(temp_wide) == INVALID_FILE_ATTRIBUTES);
    file = CreateFileW(path_wide, GENERIC_READ, FILE_SHARE_READ, NULL,
          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -617,7 +698,7 @@ int main(int argc, char **argv)
    }
    assert(argc == 2);
    test_selection_and_updates(argv[1]);
-   test_faults_and_debounce(argv[1]);
+   test_faults_and_unchanged_data(argv[1]);
    test_lock_and_fallback(argv[1]);
    test_validation_and_quarantine(argv[1]);
    test_device_header();
@@ -625,6 +706,6 @@ int main(int argc, char **argv)
 #ifdef _WIN32
    test_windows_native_paths(argv[1]);
 #endif
-   puts("Vulkan cache persistence: selection, merging, locking, fallback, write/close/rename/read failures, debounce, validation, quarantine, and size bounds passed.");
+   puts("Vulkan cache persistence: selection, merging, locking, VFS publication, fallback, write/close/rename/read failures, unchanged-data suppression, bounded quarantine, and size bounds passed.");
    return 0;
 }

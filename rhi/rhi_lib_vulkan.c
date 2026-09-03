@@ -4884,8 +4884,6 @@ static void cbh_move(struct CommandBufferHandle *dst,
          VkPipelineCache pipeline_cache;
          char pipeline_cache_file_name[96];
          unsigned pipeline_cache_dirty_count;
-         unsigned pipeline_cache_temp_serial;
-         retro_time_t pipeline_cache_last_checkpoint;
          bool pipeline_cache_storage_warned;
 
          uint64_t cookie;
@@ -6324,7 +6322,6 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static void renderer_reset_scissor_queue(Renderer *self);
    static void device_pipeline_cache_save(Device *self);
    static void device_pipeline_cache_mark_dirty(Device *self);
-   static void device_pipeline_cache_checkpoint(Device *self, bool force);
    static void renderer_reset_queue(Renderer *self);
    static void renderer_ensure_command_buffer(Renderer *self)
    {
@@ -15568,7 +15565,10 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       *compute_job_count = compute_jobs->count;
       *worker_count = 0;
       *compile_elapsed_usec = 0;
-      complete = total_count != 0 && !jobs->capture_failed &&
+      /* Zero jobs is a successful warm result when every expected identity is
+       * already present. Exact recipe validation below distinguishes that from
+       * an incomplete capture. */
+      complete = !jobs->capture_failed &&
          !compute_jobs->capture_failed;
 
       for (i = 0; i < jobs->count; i++)
@@ -17207,14 +17207,12 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 #define VULKAN_PIPELINE_CACHE_FILE_VERSION 1u
 #define VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE 24u
 #define VULKAN_PIPELINE_CACHE_MAX_DATA_SIZE (256u * 1024u * 1024u)
-#define VULKAN_PIPELINE_CACHE_CHECKPOINT_USEC (30 * 1000000)
 
 #if defined(_WIN32)
 #include <encodings/utf.h>
 #elif defined(__unix__) || defined(__APPLE__)
 #include <errno.h>
 #include <fcntl.h>
-#include <sys/file.h>
 #include <unistd.h>
 #endif
 
@@ -17247,8 +17245,8 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 
    /* A persistent lock inode/handle is essential: unlinking a lock file would
     * let a waiting process and a new process lock different objects. Locks are
-    * nonblocking and released by the OS after a crash; busy writers retry at
-    * the next checkpoint rather than blocking the emulation thread. */
+    * nonblocking and released by the OS after a crash; a busy writer leaves
+    * the cache dirty for the next safe save rather than blocking. */
    static bool device_pipeline_cache_lock(const char *path,
          struct RhiPipelineCacheLock *lock)
    {
@@ -17278,15 +17276,30 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          return true;
       }
 #elif defined(__unix__) || defined(__APPLE__)
-      lock->fd = open(lock_path, O_CREAT | O_RDWR, 0600);
-      if (lock->fd < 0)
-         return false;
-      if (flock(lock->fd, LOCK_EX | LOCK_NB) != 0)
       {
-         close(lock->fd);
-         return false;
+         struct flock file_lock;
+         lock->fd = open(lock_path, O_CREAT | O_RDWR, 0600);
+         if (lock->fd < 0)
+         {
+            LOGE("[Vulkan pipeline cache] could not open lock errno=%d\n",
+                  errno);
+            return false;
+         }
+         memset(&file_lock, 0, sizeof(file_lock));
+         /* Prefer standardized record locking to BSD flock. Android's
+          * emulated-storage FUSE path may reject the latter. */
+         file_lock.l_type = F_WRLCK;
+         file_lock.l_whence = SEEK_SET;
+         file_lock.l_len = 1;
+         if (fcntl(lock->fd, F_SETLK, &file_lock) != 0)
+         {
+            LOGI("[Vulkan pipeline cache] lock unavailable errno=%d\n",
+                  errno);
+            close(lock->fd);
+            return false;
+         }
+         return true;
       }
-      return true;
 #else
       /* Libretro VFS has no exclusive locking or atomic-replace contract.
        * Reading such paths remains supported; never risk an existing cache
@@ -17304,26 +17317,6 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       close(lock->fd);
 #else
       (void)lock;
-#endif
-   }
-
-   static bool device_pipeline_cache_replace(const char *temp_path,
-         const char *path)
-   {
-#if defined(_WIN32)
-      wchar_t *temp_wide = utf8_to_utf16_string_alloc(temp_path);
-      wchar_t *path_wide = utf8_to_utf16_string_alloc(path);
-      bool replaced = temp_wide && path_wide &&
-         MoveFileExW(temp_wide, path_wide, MOVEFILE_REPLACE_EXISTING) != 0;
-      free(temp_wide);
-      free(path_wide);
-      return replaced;
-#elif defined(__unix__) || defined(__APPLE__)
-      return rename(temp_path, path) == 0;
-#else
-      (void)temp_path;
-      (void)path;
-      return false;
 #endif
    }
 
@@ -17538,32 +17531,17 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       return file_data;
    }
 
-   static bool device_pipeline_cache_unique_path(Device *self, char *out,
-         size_t out_size, const char *path, const char *suffix)
-   {
-      unsigned long process_id = 0;
-      int length;
-#if defined(_WIN32)
-      process_id = (unsigned long)GetCurrentProcessId();
-#elif defined(__unix__) || defined(__APPLE__)
-      process_id = (unsigned long)getpid();
-#endif
-      length = snprintf(out, out_size, "%s.%s-%lu-%llx-%llx-%u", path,
-            suffix, process_id, (unsigned long long)(uintptr_t)self,
-            (unsigned long long)cpu_features_get_time_usec(),
-            ++self->pipeline_cache_temp_serial);
-      return length >= 0 && (size_t)length < out_size;
-   }
-
-   /* Called only with this file's native lock held. A rejected driver blob
-    * is moved aside, not deleted; the wrapper version remains independent of
-    * shader/core revisions and no filename-version migration is necessary. */
-   static void device_pipeline_cache_quarantine(Device *self, const char *path)
+   /* Called only with this file's native lock held. Keep exactly the newest
+    * driver-rejected blob at a stable sibling path. Atomic replacement bounds
+    * quarantine storage to one file per GPU/location while retaining useful
+    * evidence for diagnosis. If replacement fails, the primary stays intact. */
+   static void device_pipeline_cache_quarantine(const char *path)
    {
       char rejected_path[PATH_MAX_LENGTH];
-      if (device_pipeline_cache_unique_path(self, rejected_path,
-               sizeof(rejected_path), path, "rejected") &&
-          device_pipeline_cache_replace(path, rejected_path))
+      int length = snprintf(rejected_path, sizeof(rejected_path),
+            "%s.rejected", path);
+      if (length >= 0 && (size_t)length < sizeof(rejected_path) &&
+            filestream_rename(path, rejected_path) == 0)
          LOGI("[Vulkan pipeline cache] quarantined driver-rejected data\n");
    }
 
@@ -17624,7 +17602,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
             LOGI("[Vulkan pipeline cache] seeded bytes=%llu location=%s\n",
                   (unsigned long long)size, location);
          else if (rejected && locked)
-            device_pipeline_cache_quarantine(self, path);
+            device_pipeline_cache_quarantine(path);
          free(data);
       }
       if (locked)
@@ -17703,16 +17681,12 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          const char *location)
    {
       char path[PATH_MAX_LENGTH];
-      char temp_path[PATH_MAX_LENGTH];
       struct RhiPipelineCacheLock lock;
       size_t old_size = 0;
       size_t payload_size = 0;
       size_t file_size;
       void *old_data = NULL;
       uint8_t *file_data = NULL;
-      RFILE *file;
-      int64_t written;
-      int close_result;
       bool rejected = false;
       bool saved = false;
       bool read_failed;
@@ -17734,7 +17708,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       {
          if (!rejected)
             goto done;
-         device_pipeline_cache_quarantine(self, path);
+         device_pipeline_cache_quarantine(path);
          free(old_data);
          old_data = NULL;
       }
@@ -17749,27 +17723,18 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          saved = true;
          goto done;
       }
-      if (!device_pipeline_cache_unique_path(self, temp_path,
-               sizeof(temp_path), path, "tmp"))
-         goto done;
-      file = filestream_open(temp_path, RETRO_VFS_FILE_ACCESS_WRITE,
-            RETRO_VFS_FILE_ACCESS_HINT_SEQUENTIAL_BULK);
-      if (!file)
-         goto done;
       file_size = VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE + payload_size;
-      written = filestream_write(file, file_data, (int64_t)file_size);
-      close_result = filestream_close(file);
-      if (close_result != 0)
-         free(file);
-      /* Buffered providers may report disk-full only at close. Never publish
-       * such a temporary, and never delete the previous good destination. */
-      if (written == (int64_t)file_size && close_result == 0)
-         saved = device_pipeline_cache_replace(temp_path, path);
-      if (!saved)
-         filestream_delete(temp_path);
-      else
+      /* The destination lock makes one stable sibling temporary sufficient.
+       * The common helper truncates a crash leftover, verifies write/close,
+       * atomically replaces the destination and removes a failed temporary. */
+      saved = filestream_write_file_atomic(path, file_data,
+            (int64_t)file_size);
+      if (saved)
          LOGI("[Vulkan pipeline cache] saved bytes=%llu location=%s\n",
                (unsigned long long)payload_size, location);
+      else
+         LOGE("[Vulkan pipeline cache] atomic write failed location=%s bytes=%llu\n",
+               location, (unsigned long long)file_size);
 done:
       free(file_data);
       free(old_data);
@@ -17777,7 +17742,7 @@ done:
       return saved;
    }
 
-   /* Publication and checkpoints run on the render thread after worker joins.
+   /* Publication and persistence saves run on the render thread after worker joins.
     * Do not mark from compiler workers: successful publication, not a duplicate
     * or failed driver creation, is the unit of newly useful cached work. */
    static void device_pipeline_cache_mark_dirty(Device *self)
@@ -17786,24 +17751,13 @@ done:
          self->pipeline_cache_dirty_count++;
    }
 
-   static void device_pipeline_cache_checkpoint(Device *self, bool force)
+   static void device_pipeline_cache_save(Device *self)
    {
-      retro_time_t now;
-      retro_time_t elapsed;
       bool saved;
       if (self->device == VK_NULL_HANDLE ||
           self->pipeline_cache == VK_NULL_HANDLE ||
           self->pipeline_cache_dirty_count == 0)
          return;
-      now = cpu_features_get_time_usec();
-      elapsed = now - self->pipeline_cache_last_checkpoint;
-      /* More newly published pipelines do not make synchronous disk/driver
-       * work cheaper. Do not accelerate this debounce during early gameplay. */
-      if (!force && elapsed < VULKAN_PIPELINE_CACHE_CHECKPOINT_USEC)
-         return;
-      /* Advance on failures too, so a full/read-only disk or another writer
-       * causes a delayed retry, never a serialization attempt every frame. */
-      self->pipeline_cache_last_checkpoint = now;
       saved = device_pipeline_cache_write(self, retro_base_directory, "system");
       if (!saved && device_pipeline_cache_directories_differ())
          saved = device_pipeline_cache_write(self, retro_save_directory, "save");
@@ -17814,14 +17768,9 @@ done:
       }
       else if (!self->pipeline_cache_storage_warned)
       {
-         LOGI("[Vulkan pipeline cache] checkpoint deferred: no available locked, atomically replaceable system/save path; retaining dirty state\n");
+         LOGI("[Vulkan pipeline cache] save deferred: no available locked, atomically replaceable system/save path; retaining dirty state\n");
          self->pipeline_cache_storage_warned = true;
       }
-   }
-
-   static void device_pipeline_cache_save(Device *self)
-   {
-      device_pipeline_cache_checkpoint(self, true);
    }
 
    static void device_init(Device *self)
@@ -18177,7 +18126,6 @@ done:
       self->mem_props = *context_get_mem_props(context);
       self->gpu_props = *context_get_gpu_props(context);
       device_pipeline_cache_set_file_name(self);
-      self->pipeline_cache_last_checkpoint = cpu_features_get_time_usec();
 
       /* Every pipeline create receives one shared driver cache. Seed it from
        * validated persistent data on every platform. Create the destination
@@ -21839,23 +21787,26 @@ void rhi_vulkan_prepare_frame(void)
       return;
    }
 
+   /* Defensive: a live device without a renderer cannot begin or finalize a
+    * frame. Clear any stale flag before returning so finalize_frame cannot
+    * mistake this path for a successfully prepared frame. */
+   if (renderer == NULL)
+   {
+      inside_frame = false;
+      return;
+   }
+
    inside_frame = true;
    device_flush_frame_nolock(device);
    vulkan->wait_sync_index(vulkan->handle);
    ensure_sync_index_resources();
    device_next_frame_context(device);
 
-   /* Defensive: if the renderer is somehow absent while the device is live,
-    * don't dereference it. */
-   if (renderer == NULL)
-      return;
-
    renderer->scaled_uv_offset = scaled_uv_offset;
    renderer->primitive_filter_mode = (FilterMode)(filter_mode);
    renderer->sprite_filter_exclude = (FilterExclude)(filter_exclude_sprites);
    renderer->polygon_2d_filter_exclude = (FilterExclude)(filter_exclude_2d_polygons);
    renderer_precompile_if_configuration_changed(renderer);
-   device_pipeline_cache_checkpoint(device, false);
 }
 
 static ScanoutMode get_scanout_mode(bool bpp24)
