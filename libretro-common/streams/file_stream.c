@@ -2190,8 +2190,9 @@ bool filestream_write_file_atomic(const char *path,
       return true;
    }
 
-   /* filestream_rename() provides replacement semantics. Never remove the
-    * known-good destination after a failed publish: that would make a second
+   /* The built-in VFS rename provides replacement semantics on supported
+    * targets. A frontend callback may not; either way, never remove the
+    * known-good destination after a failed publish. That would make a second
     * failure destructive and would no longer be an atomic write. */
    filestream_delete(temp_path);
    free(temp_path);

@@ -64,6 +64,8 @@ def main():
     source = (root / "rhi/rhi_vulkan_cache.inc").read_text(encoding="utf-8")
     filestream_source = (root / "libretro-common/streams/file_stream.c").read_text(
         encoding="utf-8")
+    vfs_source = (root / "libretro-common/vfs/vfs_implementation.c").read_text(
+        encoding="utf-8")
     # Windows interop needs the executable and test data on the mounted drive.
     with tempfile.TemporaryDirectory(prefix="beetle-vulkan-cache-test-",
                                      dir=root if args.windows else None) as tmp:
@@ -73,6 +75,10 @@ def main():
         (work / "atomic_write_under_test.h").write_text(
             function_definition(filestream_source,
                                 "bool filestream_write_file_atomic("),
+            encoding="utf-8")
+        (work / "rename_under_test.h").write_text(
+            function_definition(vfs_source,
+                                "int retro_vfs_file_rename_impl("),
             encoding="utf-8")
         executable = work / ("persistence_test.exe" if args.windows else "persistence_test")
         compiler = "x86_64-w64-mingw32-gcc" if args.windows else "cc"
