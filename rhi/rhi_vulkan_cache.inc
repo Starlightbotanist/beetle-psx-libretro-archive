@@ -333,9 +333,11 @@
    }
 
    /* Called only with this file's native lock held. Keep exactly the newest
-    * driver-rejected blob at a stable sibling path. Atomic replacement bounds
-    * quarantine storage to one file per GPU/location while retaining useful
-    * evidence for diagnosis. If replacement fails, the primary stays intact. */
+    * driver-rejected blob at a stable sibling path. Replacement-capable VFS
+    * backends bound quarantine storage to one file per GPU/location while
+    * retaining useful evidence for diagnosis. Cache code never deletes the
+    * primary after a failed rename; a non-replacing frontend normally leaves
+    * it for a later load to retry. */
    static void device_pipeline_cache_quarantine(const char *path)
    {
       char rejected_path[PATH_MAX_LENGTH];

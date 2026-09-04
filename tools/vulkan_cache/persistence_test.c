@@ -229,24 +229,16 @@ static wchar_t *utf8_to_utf16_string_alloc(const char *text)
 }
 #endif
 
+/* Exercise the production platform rename implementation rather than a test
+ * double which merely assumes the same replacement contract. */
+#include "rename_under_test.h"
+
 static int filestream_rename(const char *old_path, const char *new_path)
 {
    vfs_replace_attempts++;
    if (fail_replace)
       return -1;
-#ifdef _WIN32
-   {
-      wchar_t *old_wide = utf8_to_utf16_string_alloc(old_path);
-      wchar_t *new_wide = utf8_to_utf16_string_alloc(new_path);
-      bool replaced = old_wide && new_wide &&
-         MoveFileExW(old_wide, new_wide, MOVEFILE_REPLACE_EXISTING) != 0;
-      free(old_wide);
-      free(new_wide);
-      return replaced ? 0 : -1;
-   }
-#else
-   return rename(old_path, new_path);
-#endif
+   return retro_vfs_file_rename_impl(old_path, new_path);
 }
 
 static VkResult vkCreatePipelineCache(void *device,
