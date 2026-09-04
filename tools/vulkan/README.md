@@ -1,10 +1,7 @@
 # Vulkan pipeline regression tests
 
-Recipe and allocation tests extract their implementation from
-`rhi/rhi_lib_vulkan.c`. Persistence tests compile the focused
-`rhi/rhi_vulkan_cache.inc` implementation and the shared atomic-write helper.
-The C fixtures supply deterministic Vulkan/allocator/file-system doubles, not
-copies of production algorithms. They need no game data or graphics device.
+The tests extract production code and use deterministic Vulkan, allocator and
+filesystem doubles. They need no game data or GPU.
 
 From the repository root on a POSIX host:
 
@@ -15,9 +12,8 @@ python3 tools/vulkan/test_precompile_jobs.py
 python3 tools/vulkan_cache/test_persistence.py
 ```
 
-The allocation tests run with ASan/UBSan. The other tests require Python 3 and
-a C compiler. Under WSL with MinGW and Windows interop, also test the actual
-Windows locking and replacement implementation:
+The allocation suite uses ASan/UBSan. Under WSL with MinGW and Windows
+interop, also test production Windows locking and replacement:
 
 ```
 python3 tools/vulkan_cache/test_persistence.py --windows
@@ -25,59 +21,39 @@ python3 tools/vulkan_cache/test_persistence.py --windows
 
 ## Scope
 
-- Recipes: effective shader constants, fixed/vertex/pass identity, shared
-  primitive/scanout selection, HDR Display VRAM, configuration transitions,
-  per-attempt context isolation, and exact expected/queued/published recipe
-  validation.
-- Allocation: transactional pool/map growth, failed publication, duplicate
-  handle ownership, and cleanup.
-- Precompile jobs: bounded graphics/compute batching, cache-probe flags,
-  cache-hit reuse, skipped completed work, and per-pipeline partial success
-  when a batched driver call reports an aggregate failure.
-- Persistence: both-location merge, stale concurrent writers, process locks,
-  corrupt/incompatible files, allocation and I/O failures, checked close,
-  stable-temporary cleanup, atomic replacement which preserves the prior file
-  on failure, bounded rejection quarantine, and unchanged-data suppression.
+- Recipes: normalized identities, renderer selections, configuration changes,
+  isolated attempts and exact expected/queued/published validation.
+- Allocation: transactional growth, publication failure, duplicate ownership
+  and cleanup.
+- Jobs: bounded graphics/compute batches, cache probing, hit reuse and partial
+  success after an aggregate driver failure.
+- Persistence: directory merging, concurrent writers, locks, invalid data,
+  I/O failures, atomic replacement, bounded quarantine and unchanged data.
 
-These are logical/failure-path tests, not a substitute for real-driver execution.
-After renderer changes, run a core with Vulkan validation and representative
-gameplay, including live option changes. Android remains authoritative for
-compilation and persistence-save costs. iOS/tvOS
-need their own device testing.
+These logical and failure-path tests do not replace driver testing. Test
+renderer changes with Vulkan validation, representative gameplay and live
+option changes. Android remains authoritative for timing; iOS and tvOS require
+device testing.
 
-The precompile traversal is derived from Beetle's renderer state branches.
-Runtime and capture share state setters, program selectors, and normalized
-identity generation. Validation checks every enumerated exact identity before
-and after publication, including identities already present in memory. Its
-summary therefore reports `plan_complete`, not an unqualified claim that every
-future runtime branch was anticipated. Any later first-use identity absent
-after a successful plan is reported as a runtime escape and revokes that
-plan's completeness. New paths still need regression cases and representative
-runtime coverage.
+Precompilation follows Beetle's renderer branches and shares runtime state
+setters, program selection and identity generation. `plan_complete` covers the
+enumerated identities, not every possible future renderer path. A later miss
+is logged as a runtime escape and revokes completeness.
 
-An incomplete plan receives one bounded retry at the same already-blocking
-configuration boundary. The second pass queues only identities that were not
-published by the first, while partial success is persisted even if the plan
-remains incomplete. A second failure is remembered so it cannot become a
-blocking retry on every gameplay frame; observed runtime misses remain logged.
+An incomplete plan retries once at the same blocking configuration boundary.
+The retry queues only unpublished identities; a second failure is remembered
+to prevent repeated gameplay hitches.
 
-When `VK_EXT_pipeline_creation_cache_control` and its feature query are
-available, a populated driver cache is probed with fail-on-compile-required
-before normal compilation. Cache hits are retained and only misses use the
-compiling path; unexpected probe errors fall back safely. Both phases submit
-small batches to reduce driver-call overhead while preserving each output
-handle's result.
+When supported, `VK_EXT_pipeline_creation_cache_control` probes a populated
+cache before compilation. Hits are retained, errors fall back safely and only
+misses compile. Both phases use small batches.
 
-Persistent files are named by Vulkan vendor/device/cache UUID and contain an
-embedded wrapper version. Ordinary shader changes do not require a wrapper
-version bump. Both SYSTEM and SAVE are imported, and a writer locks and merges
-the current destination before replacement. Native Windows/POSIX paths support
-safe writes; VFS-only paths remain readable but cannot be written safely without
-locking/atomic-replace support, so the core tries the other directory.
+Persistent files are keyed by Vulkan vendor, device and cache UUID and include
+a wrapper version. SYSTEM and SAVE caches are imported. Writers lock and merge
+the current destination before atomic replacement. VFS-only paths remain
+readable, but safe writes require native locking and replacement support.
 
-No cache serialization or filesystem write is initiated from the per-frame
-gameplay path. Successful precompilation saves immediately at the existing
-configuration-change boundary, and clean Vulkan teardown saves runtime-learned
-pipelines. Each cache location retains at most one driver-rejected payload at
-the stable `.rejected` sibling path. Existing unkeyed test-era files are left
-untouched and are not migrated.
+Gameplay does not serialize the cache. Successful precompilation saves at its
+configuration boundary; clean teardown saves runtime discoveries. Each cache
+location keeps at most one `.rejected` payload. Test-era unkeyed files are not
+migrated.

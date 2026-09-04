@@ -1,11 +1,7 @@
-/* Internal persistent VkPipelineCache implementation. Included once from
- * rhi_lib_vulkan.c after Device is defined; keeping it in the same translation
- * unit avoids exposing private renderer state through another interface. */
+/* Persistent cache internals included after Device is defined. */
 #define VULKAN_PIPELINE_CACHE_DIR_NAME "Beetle PSX HW"
 #define VULKAN_PIPELINE_CACHE_FILE_MAGIC "BPSXVKC1"
-/* This version is stored in every cache file. Increment it only when a hard
- * incompatibility makes the wrapper format unreadable; Vulkan's own payload
- * header separately handles GPU and driver compatibility. */
+/* Increment only for incompatible wrapper-format changes. */
 #define VULKAN_PIPELINE_CACHE_FILE_VERSION 1u
 #define VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE 24u
 #define VULKAN_PIPELINE_CACHE_MAX_DATA_SIZE (256u * 1024u * 1024u)
@@ -44,10 +40,7 @@
             (unsigned)self->gpu_props.vendorID,
             (unsigned)self->gpu_props.deviceID, uuid);
    }
-   /* A persistent lock inode/handle is essential: unlinking a lock file would
-    * let a waiting process and a new process lock different objects. Locks are
-    * nonblocking and released by the OS after a crash; a busy writer leaves
-    * the cache dirty for the next safe save rather than blocking. */
+   /* Keep the lock file stable so all processes lock the same object. */
    static bool device_pipeline_cache_lock(const char *path,
          struct RhiPipelineCacheLock *lock)
    {
@@ -87,8 +80,7 @@
             return false;
          }
          memset(&file_lock, 0, sizeof(file_lock));
-         /* Prefer standardized record locking to BSD flock. Android's
-          * emulated-storage FUSE path may reject the latter. */
+         /* Android's emulated-storage FUSE may reject BSD flock. */
          file_lock.l_type = F_WRLCK;
          file_lock.l_whence = SEEK_SET;
          file_lock.l_len = 1;
@@ -102,9 +94,7 @@
          return true;
       }
 #else
-      /* Libretro VFS has no exclusive locking or atomic-replace contract.
-       * Reading such paths remains supported; never risk an existing cache
-       * by pretending an uncoordinated VFS write is an atomic transaction. */
+      /* VFS paths are readable, but unsafe to write without locking. */
       (void)lock;
       return false;
 #endif
@@ -196,8 +186,7 @@
    static void device_pipeline_cache_ignore(const char *path,
          const char *reason)
    {
-      /* Do not delete from the read path: another process may have replaced
-       * this file since it was opened. A later locked save can replace it. */
+      /* A later locked save may safely replace ignored data. */
       LOGI("[Vulkan pipeline cache] ignored %s cache: %s\n", reason, path);
    }
 
@@ -251,8 +240,7 @@
           file_size > (int64_t)(VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE +
              VULKAN_PIPELINE_CACHE_MAX_DATA_SIZE))
       {
-         /* An unreadable or oversized existing cache must not be replaced by
-          * a smaller snapshot that could not merge its existing entries. */
+         /* Never replace a cache that could not be read and merged. */
          *read_failed = file_size < 0 || file_size >
             (int64_t)(VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE +
                VULKAN_PIPELINE_CACHE_MAX_DATA_SIZE);
@@ -332,12 +320,7 @@
       return file_data;
    }
 
-   /* Called only with this file's native lock held. Keep exactly the newest
-    * driver-rejected blob at a stable sibling path. Replacement-capable VFS
-    * backends bound quarantine storage to one file per GPU/location while
-    * retaining useful evidence for diagnosis. Cache code never deletes the
-    * primary after a failed rename; a non-replacing frontend normally leaves
-    * it for a later load to retry. */
+   /* With the native lock held, retain one rejected sibling for diagnosis. */
    static void device_pipeline_cache_quarantine(const char *path)
    {
       char rejected_path[PATH_MAX_LENGTH];
@@ -362,7 +345,7 @@
       result = vkCreatePipelineCache(self->device, &info, NULL, &source);
       if (result != VK_SUCCESS)
       {
-         /* Resource/device failures do not demonstrate a bad driver blob. */
+         /* Resource/device failures do not prove that the blob is invalid. */
          *rejected = result != VK_ERROR_OUT_OF_HOST_MEMORY &&
             result != VK_ERROR_OUT_OF_DEVICE_MEMORY &&
             result != VK_ERROR_DEVICE_LOST;
@@ -417,8 +400,7 @@
    {
       bool seeded = device_pipeline_cache_seed_path(self,
             retro_base_directory, "system");
-      /* A readable but unwritable SYSTEM file must not shadow a newer SAVE
-       * fallback. Merge both valid candidates, even when SYSTEM succeeded. */
+      /* Merge both locations; an unwritable SYSTEM file may be stale. */
       if (device_pipeline_cache_directories_differ())
          seeded = device_pipeline_cache_seed_path(self,
                retro_save_directory, "save") || seeded;
@@ -500,9 +482,7 @@
           !device_pipeline_cache_lock(path, &lock))
          return false;
 
-      /* Merge the latest disk state while holding the destination lock, not
-       * just the startup snapshot. Two running cores can then add pipelines
-       * without the later writer erasing the earlier writer's discoveries. */
+      /* Merge under lock so concurrent writers do not lose discoveries. */
       old_data = device_pipeline_cache_load_path(self, &old_size, root,
             self->pipeline_cache_file_name, location, &read_failed);
       if (read_failed)
@@ -528,9 +508,7 @@
          goto done;
       }
       file_size = VULKAN_PIPELINE_CACHE_FILE_HEADER_SIZE + payload_size;
-      /* The destination lock makes one stable sibling temporary sufficient.
-       * The common helper truncates a crash leftover, verifies write/close,
-       * atomically replaces the destination and removes a failed temporary. */
+      /* The lock permits one stable temporary and atomic replacement. */
       saved = filestream_write_file_atomic(path, file_data,
             (int64_t)file_size);
       if (saved)
@@ -546,9 +524,7 @@ done:
       return saved;
    }
 
-   /* Publication and persistence saves run on the render thread after worker joins.
-    * Do not mark from compiler workers: successful publication, not a duplicate
-    * or failed driver creation, is the unit of newly useful cached work. */
+   /* Only successfully published pipelines make the cache dirty. */
    static void device_pipeline_cache_mark_dirty(Device *self)
    {
       self->pipeline_cache_has_data = true;
