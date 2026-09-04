@@ -72,13 +72,10 @@ typedef struct Device
 typedef struct RFILE { FILE *file; bool writing; } RFILE;
 static char retro_base_directory[4096];
 static char retro_save_directory[4096];
-static retro_time_t mock_time = 1000000;
 static unsigned snapshot_queries, write_opens;
 static unsigned vfs_replace_attempts;
 static bool fail_write, fail_close, fail_replace, fail_read;
 static VkResult import_error, merge_error;
-
-static retro_time_t cpu_features_get_time_usec(void) { return mock_time; }
 
 #ifdef _WIN32
 static wchar_t *utf8_to_utf16_string_alloc(const char *text);
