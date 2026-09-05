@@ -9084,6 +9084,32 @@ static void vk_feedback_capture(Renderer *self)
          }
       }
 
+   if (vk_feedback_diag.resolved_scaled >= 256)
+   {
+      unsigned row_y;
+      for (row_y = ybegin; row_y < yend; row_y += BLOCK_HEIGHT)
+      {
+         unsigned row_end = min_(row_y + BLOCK_HEIGHT, yend);
+         unsigned scaled_nonblack = 0;
+         unsigned unscaled_nonblack = 0;
+         unsigned mismatch = 0;
+         for (y = row_y; y < row_end; y++)
+            for (x = xbegin; x < xend; x++)
+            {
+               uint16_t reference = (uint16_t)unscaled[y * FB_WIDTH + x];
+               uint32_t pixel = scaled[(y * self->scaling) * scaled_width +
+                     x * self->scaling];
+               uint16_t converted = vk_feedback_rgba8_to_1555(pixel);
+               scaled_nonblack += (converted & 0x7fffu) != 0;
+               unscaled_nonblack += (reference & 0x7fffu) != 0;
+               mismatch += converted != reference;
+            }
+         LOGI("[VKFB content-row] f=%u y=%u scaled_nonblack=%u unscaled_nonblack=%u mismatch=%u\n",
+               vk_feedback_diag.frame, row_y, scaled_nonblack,
+               unscaled_nonblack, mismatch);
+      }
+   }
+
    LOGI("[VKFB capture] f=%u scale=%u source=%u,%u,%u,%u hash=%016llx/%016llx nonuniform=%u origin_mismatch=%u any_mismatch=%u\n",
          vk_feedback_diag.frame, self->scaling,
          region->x, region->y, region->width, region->height,
@@ -9121,7 +9147,8 @@ static void vk_feedback_end_frame(Renderer *self)
    }
    if (vk_feedback_diag.scaled_reads || vk_feedback_diag.resolved_scaled)
    {
-      if (vk_feedback_quiet >= 10 && vk_feedback_capture_bursts < 8)
+      if (vk_feedback_diag.scaled_reads && vk_feedback_quiet >= 10 &&
+            vk_feedback_capture_bursts < 8)
       {
          vk_feedback_capture_remaining = 4;
          vk_feedback_capture_bursts++;
@@ -9316,6 +9343,37 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    offset_uv = self->scaled_uv_offset && self->render_state.primitive_type == PrimitiveType_Polygon;
 
    vk_feedback_diag.draws++;
+   if (vk_feedback_quiet >= 10)
+   {
+      unsigned i;
+      LOGI("[VKFB first-draw] f=%u n=%u prim=%u count=%u texture=%u modulate=%u dither=%u semi=%u mask=%u force=%u rect=%u,%u,%u,%u draw=%u,%u,%u,%u offset=%d,%d rp=%u:%u,%u,%u,%u\n",
+            vk_feedback_diag.frame, vk_feedback_diag.draws,
+            (unsigned)self->render_state.primitive_type, count,
+            (unsigned)self->render_state.texture_mode,
+            self->render_state.texture_color_modulate ? 1u : 0u,
+            self->render_state.primitive_dither ? 1u : 0u,
+            (unsigned)self->render_state.semi_transparent,
+            self->render_state.mask_test ? 1u : 0u,
+            self->render_state.force_mask_bit ? 1u : 0u,
+            rect.x, rect.y, rect.width, rect.height,
+            self->render_state.draw_rect.x, self->render_state.draw_rect.y,
+            self->render_state.draw_rect.width,
+            self->render_state.draw_rect.height,
+            self->render_state.draw_offset_x,
+            self->render_state.draw_offset_y,
+            self->atlas.renderpass.inside ? 1u : 0u,
+            self->atlas.renderpass.rect.x,
+            self->atlas.renderpass.rect.y,
+            self->atlas.renderpass.rect.width,
+            self->atlas.renderpass.rect.height);
+      for (i = 0; i < count; i++)
+         LOGI("[VKFB first-vertex] f=%u i=%u xyw=%f,%f,%f color=%08x uv=%u,%u cf=%f,%f,%f fog=%f,%f,%f,%f\n",
+               vk_feedback_diag.frame, i, vertices[i].x, vertices[i].y,
+               vertices[i].w, vertices[i].color, vertices[i].u,
+               vertices[i].v, vertices[i].cf[0], vertices[i].cf[1],
+               vertices[i].cf[2], vertices[i].fog[0], vertices[i].fog[1],
+               vertices[i].fog[2], vertices[i].fog[3]);
+   }
    if (scaled_read)
    {
       unsigned ownership[4];
@@ -9836,7 +9894,7 @@ static const ClearCandidate * renderer_find_clear_candidate(Renderer *self,
 static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
 {
    RenderPassInfo_Subpass subpass;
-   if (vk_feedback_diag.scaled_reads)
+   if (vk_feedback_diag.scaled_reads || vk_feedback_diag.resolved_scaled)
       LOGI("[VKFB renderpass] f=%u rect=%u,%u,%u,%u feedback=%u queues=%u/%u/%u/%u resolves=%u/%u\n",
             vk_feedback_diag.frame, rect->x, rect->y,
             rect->width, rect->height,
