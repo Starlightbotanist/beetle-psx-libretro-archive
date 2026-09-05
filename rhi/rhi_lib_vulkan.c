@@ -8763,12 +8763,14 @@ struct VkFeedbackDiag
    unsigned resolved_scaled;
    unsigned sync_detail;
    TTRect sampled;
+   TTRect resolved;
 };
 
 static struct VkFeedbackDiag vk_feedback_diag;
 static unsigned vk_feedback_quiet = 60;
 static unsigned vk_feedback_capture_remaining;
 static unsigned vk_feedback_capture_bursts;
+static TTRect vk_feedback_capture_rect;
 
 static void renderer_flush_resolves(Renderer *self)
 {
@@ -8967,6 +8969,7 @@ static uint16_t vk_feedback_rgba8_to_1555(uint32_t pixel)
 static void vk_feedback_capture(Renderer *self)
 {
    unsigned x, y, sx, sy;
+   unsigned xbegin, xend, ybegin, yend;
    unsigned nonuniform = 0;
    unsigned origin_mismatch = 0;
    unsigned any_mismatch = 0;
@@ -8980,6 +8983,7 @@ static void vk_feedback_capture(Renderer *self)
    CommandBufferHandle cmd;
    const uint32_t *scaled;
    const uint32_t *unscaled;
+   const TTRect *region;
    void *mapped;
 
    if (self->msaa > 1 || self->scaled_fb_format != VK_FORMAT_R8G8B8A8_UNORM)
@@ -9042,8 +9046,18 @@ static void vk_feedback_capture(Renderer *self)
    scaled = (const uint32_t *)mapped;
    unscaled = (const uint32_t *)((const uint8_t *)mapped + scaled_size);
    memset(block_mismatch, 0, sizeof(block_mismatch));
-   for (y = 0; y < FB_HEIGHT; y++)
-      for (x = 0; x < FB_WIDTH; x++)
+   if (vk_feedback_diag.sampled.width)
+      region = &vk_feedback_diag.sampled;
+   else if (vk_feedback_diag.resolved.width)
+      region = &vk_feedback_diag.resolved;
+   else
+      region = &vk_feedback_capture_rect;
+   xbegin = min_(region->x, FB_WIDTH);
+   xend = min_(region->x + region->width, FB_WIDTH);
+   ybegin = min_(region->y, FB_HEIGHT);
+   yend = min_(region->y + region->height, FB_HEIGHT);
+   for (y = ybegin; y < yend; y++)
+      for (x = xbegin; x < xend; x++)
       {
          uint16_t reference = (uint16_t)unscaled[y * FB_WIDTH + x];
          uint32_t first = scaled[(y * self->scaling) * scaled_width +
@@ -9072,8 +9086,7 @@ static void vk_feedback_capture(Renderer *self)
 
    LOGI("[VKFB capture] f=%u scale=%u source=%u,%u,%u,%u hash=%016llx/%016llx nonuniform=%u origin_mismatch=%u any_mismatch=%u\n",
          vk_feedback_diag.frame, self->scaling,
-         vk_feedback_diag.sampled.x, vk_feedback_diag.sampled.y,
-         vk_feedback_diag.sampled.width, vk_feedback_diag.sampled.height,
+         region->x, region->y, region->width, region->height,
          (unsigned long long)vk_feedback_hash(scaled, scaled_size),
          (unsigned long long)vk_feedback_hash(unscaled, unscaled_size),
          nonuniform, origin_mismatch, any_mismatch);
@@ -9099,20 +9112,25 @@ static void vk_feedback_capture(Renderer *self)
 
 static void vk_feedback_end_frame(Renderer *self)
 {
-   if (vk_feedback_diag.scaled_reads)
+   if (vk_feedback_diag.resolved_scaled >= 256 &&
+         vk_feedback_capture_bursts < 8)
+   {
+      vk_feedback_capture_remaining = 4;
+      vk_feedback_capture_bursts++;
+      vk_feedback_capture_rect = vk_feedback_diag.resolved;
+   }
+   if (vk_feedback_diag.scaled_reads || vk_feedback_diag.resolved_scaled)
    {
       if (vk_feedback_quiet >= 10 && vk_feedback_capture_bursts < 8)
       {
          vk_feedback_capture_remaining = 4;
          vk_feedback_capture_bursts++;
+         vk_feedback_capture_rect = vk_feedback_diag.sampled;
       }
       vk_feedback_quiet = 0;
    }
    else
-   {
       vk_feedback_quiet++;
-      vk_feedback_capture_remaining = 0;
-   }
 
    if (vk_feedback_capture_remaining)
    {
@@ -9853,6 +9871,13 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
    subpass.num_color_attachments = 1;
 
    { const ClearCandidate *clear_candidate = renderer_find_clear_candidate(self, rect);
+
+   if (vk_feedback_diag.scaled_reads || vk_feedback_diag.resolved_scaled)
+      LOGI("[VKFB pass-load] f=%u clear=%u candidates=%u color=%04x z=%f\n",
+            vk_feedback_diag.frame, clear_candidate ? 1u : 0u,
+            (unsigned)ClearCandidateVec_size(&self->queue.clear_candidates),
+            clear_candidate ? clear_candidate->color : 0u,
+            clear_candidate ? clear_candidate->z : 0.0f);
 
    subpass.color_attachments[0] = 0;
    if (self->render_pass_is_feedback)
@@ -19071,7 +19096,26 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       if ((bits & dirty_bits) == 0)
          return;
       if (domain == Domain_Scaled)
+      {
+         unsigned y;
          vk_feedback_diag.sync_dirty_scaled++;
+         if (!vk_feedback_diag.resolved.width)
+            vk_feedback_diag.resolved = *rect;
+         else
+            rect_extend_bounding_box(&vk_feedback_diag.resolved, rect);
+         for (y = ybegin; y <= yend; y++)
+         {
+            unsigned x;
+            unsigned counts[4] = { 0, 0, 0, 0 };
+            for (x = xbegin; x <= xend; x++)
+               counts[*fbatlas_info(self, x, y) &
+                     STATUS_OWNERSHIP_MASK]++;
+            if (counts[STATUS_SFB_ONLY] || counts[STATUS_SFB_PREFER])
+               LOGI("[VKFB ownership-row] f=%u y=%u owner=%u/%u/%u/%u\n",
+                     vk_feedback_diag.frame, y * BLOCK_HEIGHT,
+                     counts[0], counts[1], counts[2], counts[3]);
+         }
+      }
 
       /* For scaled domain,
        * we need to blit from unscaled domain to scaled. */
