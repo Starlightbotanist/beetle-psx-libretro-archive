@@ -9961,7 +9961,7 @@ static void renderer_render_semi_transparent_primitives(Renderer *self){
             vkCmdPipelineBarrier(commandbuffer_get_command_buffer(cbh_get(&self->cmd)),
                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-               VK_DEPENDENCY_BY_REGION_BIT,
+               0,
                1, &barrier, 0, NULL, 0, NULL);
          }
 
