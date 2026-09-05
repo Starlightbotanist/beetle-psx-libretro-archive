@@ -58,12 +58,7 @@ void main()
 	const float blend_amt = 1.0;
 #endif
 
-#ifdef MSAA
-	// Need to be render per-sample here.
-	vec4 fbcolor = subpassLoad(uFeedbackFramebuffer, gl_SampleID);
-#else
-	vec4 fbcolor = subpassLoad(uFeedbackFramebuffer);
-#endif
+	vec4 fbcolor = vec4(0.0);
 
 	if (MASK_TEST != 0 && fbcolor.a > 0.5)
 		discard;
