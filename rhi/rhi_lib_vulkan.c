@@ -9595,11 +9595,8 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
     * STORAGE_WRITE). Order the compute writes before the pass reads them. One
     * memory barrier per render-pass flush; the GENERAL->GENERAL layout is
     * unchanged so no decompress/transition cost is incurred. */
-   commandbuffer_barrier_simple(cbh_get(&self->cmd),
-         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-         VK_ACCESS_SHADER_WRITE_BIT,
-         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-         VK_ACCESS_SHADER_READ_BIT);
+   /* Diagnostic: broaden this to every producer and consumer class. */
+   commandbuffer_full_barrier(cbh_get(&self->cmd));
 
    commandbuffer_begin_render_pass(cbh_get(&self->cmd), &info, VK_SUBPASS_CONTENTS_INLINE);
    commandbuffer_set_scissor(cbh_get(&self->cmd), &info.render_area);
