@@ -9044,7 +9044,7 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
           * the texture is rendered content */
          bool texture_rendered = fbatlas_texture_rendered(&self->atlas, &hd_texture_vram);
          filtering = !texture_rendered;
-         scaled_read = texture_rendered;
+         scaled_read = false;
       }
       else
       {
