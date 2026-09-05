@@ -20384,7 +20384,7 @@ void rhi_vulkan_push_quad(
       return;
 
    renderer->render_state.texture_color_modulate = texture_blend_mode == 2;
-   renderer->render_state.primitive_dither = dither;
+   renderer->render_state.primitive_dither = dither && !is_sprite;
    renderer_set_palette_offset(renderer, clut_x, clut_y);
    renderer_set_texture_offset(renderer, texpage_x, texpage_y);
    renderer->render_state.mask_test = mask_test;
