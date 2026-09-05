@@ -8752,6 +8752,24 @@ static void renderer_hazard(Renderer *self, StatusFlags flags)
    commandbuffer_barrier_simple(cbh_get(&self->cmd), src_stages, src_access, dst_stages, dst_access);
 }
 
+struct VkFeedbackDiag
+{
+   unsigned frame;
+   unsigned draws;
+   unsigned scaled_reads;
+   unsigned draw_detail;
+   unsigned sync_scaled;
+   unsigned sync_dirty_scaled;
+   unsigned resolved_scaled;
+   unsigned sync_detail;
+   TTRect sampled;
+};
+
+static struct VkFeedbackDiag vk_feedback_diag;
+static unsigned vk_feedback_quiet = 60;
+static unsigned vk_feedback_capture_remaining;
+static unsigned vk_feedback_capture_bursts;
+
 static void renderer_flush_resolves(Renderer *self)
 {
    struct Push
@@ -8759,6 +8777,12 @@ static void renderer_flush_resolves(Renderer *self)
       float inv_size[2];
       uint32_t scale;
    };
+
+   if (!Rect2DVec_empty(&self->queue.scaled_resolves))
+      LOGI("[VKFB resolve-dispatch] f=%u scaled=%u unscaled=%u\n",
+            vk_feedback_diag.frame,
+            (unsigned)Rect2DVec_size(&self->queue.scaled_resolves),
+            (unsigned)Rect2DVec_size(&self->queue.unscaled_resolves));
 
    if (!Rect2DVec_empty(&self->queue.scaled_resolves))
    {
@@ -8891,7 +8915,221 @@ static void vram_prov_op(Renderer *self, int x, int y, int w, int h, int set)
             self->vram_gpu_written[word] |= m;
          else
             self->vram_gpu_written[word] &= ~m;
+   }
+}
+
+static void vk_feedback_rect_status(FBAtlas *atlas, const TTRect *rect,
+      unsigned ownership[4], unsigned *flags)
+{
+   unsigned x, y;
+   unsigned xbegin, xend, ybegin, yend;
+   memset(ownership, 0, 4 * sizeof(*ownership));
+   *flags = 0;
+   if (!rect->width || !rect->height)
+      return;
+   xbegin = rect->x / BLOCK_WIDTH;
+   xend = min_((rect->x + rect->width - 1) / BLOCK_WIDTH,
+         NUM_BLOCKS_X - 1);
+   ybegin = rect->y / BLOCK_HEIGHT;
+   yend = min_((rect->y + rect->height - 1) / BLOCK_HEIGHT,
+         NUM_BLOCKS_Y - 1);
+   for (y = ybegin; y <= yend; y++)
+      for (x = xbegin; x <= xend; x++)
+      {
+         StatusFlags status = *fbatlas_info(atlas, x, y);
+         ownership[status & STATUS_OWNERSHIP_MASK]++;
+         *flags |= status;
       }
+}
+
+static uint64_t vk_feedback_hash(const void *data, size_t size)
+{
+   const uint8_t *p = (const uint8_t *)data;
+   uint64_t hash = UINT64_C(1469598103934665603);
+   while (size--)
+   {
+      hash ^= *p++;
+      hash *= UINT64_C(1099511628211);
+   }
+   return hash;
+}
+
+static uint16_t vk_feedback_rgba8_to_1555(uint32_t pixel)
+{
+   unsigned r = pixel & 0xffu;
+   unsigned g = (pixel >> 8) & 0xffu;
+   unsigned b = (pixel >> 16) & 0xffu;
+   unsigned a = pixel >> 24;
+   return (uint16_t)((r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10) |
+         ((a >= 0x80u) << 15));
+}
+
+static void vk_feedback_capture(Renderer *self)
+{
+   unsigned x, y, sx, sy;
+   unsigned nonuniform = 0;
+   unsigned origin_mismatch = 0;
+   unsigned any_mismatch = 0;
+   unsigned block_mismatch[NUM_BLOCKS_X * NUM_BLOCKS_Y];
+   unsigned scaled_width = FB_WIDTH * self->scaling;
+   unsigned scaled_height = FB_HEIGHT * self->scaling;
+   size_t scaled_size = (size_t)scaled_width * scaled_height * sizeof(uint32_t);
+   size_t unscaled_size = (size_t)FB_WIDTH * FB_HEIGHT * sizeof(uint32_t);
+   BufferCreateInfo info;
+   BufferHandle buffer;
+   CommandBufferHandle cmd;
+   const uint32_t *scaled;
+   const uint32_t *unscaled;
+   void *mapped;
+
+   if (self->msaa > 1 || self->scaled_fb_format != VK_FORMAT_R8G8B8A8_UNORM)
+   {
+      LOGI("[VKFB capture-skip] f=%u scale=%u msaa=%u format=%u\n",
+            vk_feedback_diag.frame, self->scaling, self->msaa,
+            (unsigned)self->scaled_fb_format);
+      return;
+   }
+
+   memset(&info, 0, sizeof(info));
+   info.domain = BufferDomain_CachedHost;
+   info.size = scaled_size + unscaled_size;
+   info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+   buffer = device_create_buffer(self->device, &info, NULL);
+   cmd = device_request_command_buffer(self->device, Type_Generic);
+
+   commandbuffer_image_barrier(cbh_get(&cmd), ih_get(&self->scaled_framebuffer),
+         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+         VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+   commandbuffer_image_barrier(cbh_get(&cmd), ih_get(&self->framebuffer),
+         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+         VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+   {
+      VkOffset3D offset = { 0, 0, 0 };
+      VkExtent3D scaled_extent = { scaled_width, scaled_height, 1 };
+      VkExtent3D unscaled_extent = { FB_WIDTH, FB_HEIGHT, 1 };
+      VkImageSubresourceLayers subresource = {
+         VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1
+      };
+      commandbuffer_copy_image_to_buffer(cbh_get(&cmd), bh_get(&buffer),
+            ih_get(&self->scaled_framebuffer), 0, &offset, &scaled_extent,
+            0, 0, &subresource);
+      commandbuffer_copy_image_to_buffer(cbh_get(&cmd), bh_get(&buffer),
+            ih_get(&self->framebuffer), scaled_size, &offset,
+            &unscaled_extent, 0, 0, &subresource);
+   }
+   commandbuffer_image_barrier(cbh_get(&cmd), ih_get(&self->scaled_framebuffer),
+         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+         VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT);
+   commandbuffer_image_barrier(cbh_get(&cmd), ih_get(&self->framebuffer),
+         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+         VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT);
+   commandbuffer_barrier_simple(cbh_get(&cmd), VK_PIPELINE_STAGE_TRANSFER_BIT,
+         VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+         VK_ACCESS_HOST_READ_BIT);
+   device_submit(self->device, &cmd, NULL, 0, NULL);
+   device_wait_idle_nolock(self->device);
+
+   mapped = device_map_host_buffer(self->device, bh_get(&buffer),
+         MEMORY_ACCESS_READ_BIT);
+   scaled = (const uint32_t *)mapped;
+   unscaled = (const uint32_t *)((const uint8_t *)mapped + scaled_size);
+   memset(block_mismatch, 0, sizeof(block_mismatch));
+   for (y = 0; y < FB_HEIGHT; y++)
+      for (x = 0; x < FB_WIDTH; x++)
+      {
+         uint16_t reference = (uint16_t)unscaled[y * FB_WIDTH + x];
+         uint32_t first = scaled[(y * self->scaling) * scaled_width +
+               x * self->scaling];
+         bool differs = false;
+         bool varied = false;
+         if (vk_feedback_rgba8_to_1555(first) != reference)
+            origin_mismatch++;
+         for (sy = 0; sy < self->scaling; sy++)
+            for (sx = 0; sx < self->scaling; sx++)
+            {
+               uint32_t pixel = scaled[(y * self->scaling + sy) *
+                     scaled_width + x * self->scaling + sx];
+               varied |= pixel != first;
+               differs |= vk_feedback_rgba8_to_1555(pixel) != reference;
+            }
+         nonuniform += varied;
+         if (differs)
+         {
+            unsigned block = (y / BLOCK_HEIGHT) * NUM_BLOCKS_X +
+                  x / BLOCK_WIDTH;
+            any_mismatch++;
+            block_mismatch[block]++;
+         }
+      }
+
+   LOGI("[VKFB capture] f=%u scale=%u source=%u,%u,%u,%u hash=%016llx/%016llx nonuniform=%u origin_mismatch=%u any_mismatch=%u\n",
+         vk_feedback_diag.frame, self->scaling,
+         vk_feedback_diag.sampled.x, vk_feedback_diag.sampled.y,
+         vk_feedback_diag.sampled.width, vk_feedback_diag.sampled.height,
+         (unsigned long long)vk_feedback_hash(scaled, scaled_size),
+         (unsigned long long)vk_feedback_hash(unscaled, unscaled_size),
+         nonuniform, origin_mismatch, any_mismatch);
+   for (x = 0; x < 12; x++)
+   {
+      unsigned i, best = 0;
+      for (i = 1; i < NUM_BLOCKS_X * NUM_BLOCKS_Y; i++)
+         if (block_mismatch[i] > block_mismatch[best])
+            best = i;
+      if (!block_mismatch[best])
+         break;
+      LOGI("[VKFB block] f=%u rank=%u xy=%u,%u mismatch=%u status=%04x\n",
+            vk_feedback_diag.frame, x,
+            (best % NUM_BLOCKS_X) * BLOCK_WIDTH,
+            (best / NUM_BLOCKS_X) * BLOCK_HEIGHT,
+            block_mismatch[best], self->atlas.fb_info[best]);
+      block_mismatch[best] = 0;
+   }
+   device_unmap_host_buffer(self->device, bh_get(&buffer),
+         MEMORY_ACCESS_READ_BIT);
+   bh_reset(&buffer);
+}
+
+static void vk_feedback_end_frame(Renderer *self)
+{
+   if (vk_feedback_diag.scaled_reads)
+   {
+      if (vk_feedback_quiet >= 10 && vk_feedback_capture_bursts < 8)
+      {
+         vk_feedback_capture_remaining = 4;
+         vk_feedback_capture_bursts++;
+      }
+      vk_feedback_quiet = 0;
+   }
+   else
+   {
+      vk_feedback_quiet++;
+      vk_feedback_capture_remaining = 0;
+   }
+
+   if (vk_feedback_capture_remaining)
+   {
+      vk_feedback_capture(self);
+      vk_feedback_capture_remaining--;
+   }
+   LOGI("[VKFB frame] f=%u draws=%u scaled=%u sync=%u dirty=%u resolved=%u quiet=%u burst=%u remaining=%u\n",
+         vk_feedback_diag.frame, vk_feedback_diag.draws,
+         vk_feedback_diag.scaled_reads, vk_feedback_diag.sync_scaled,
+         vk_feedback_diag.sync_dirty_scaled, vk_feedback_diag.resolved_scaled,
+         vk_feedback_quiet, vk_feedback_capture_bursts,
+         vk_feedback_capture_remaining);
+   {
+      unsigned next_frame = vk_feedback_diag.frame + 1;
+      memset(&vk_feedback_diag, 0, sizeof(vk_feedback_diag));
+      vk_feedback_diag.frame = next_frame;
+   }
 }
 
 static bool vram_prov_any(Renderer *self, int x, int y, int w, int h)
@@ -9058,6 +9296,48 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
       scaled_read = false;
    }
    offset_uv = self->scaled_uv_offset && self->render_state.primitive_type == PrimitiveType_Polygon;
+
+   vk_feedback_diag.draws++;
+   if (scaled_read)
+   {
+      unsigned ownership[4];
+      unsigned flags;
+      unsigned u[4] = { 0, 0, 0, 0 };
+      unsigned v[4] = { 0, 0, 0, 0 };
+      unsigned i;
+      vk_feedback_diag.scaled_reads++;
+      for (i = 0; i < count && i < 4; i++)
+      {
+         u[i] = vertices[i].u;
+         v[i] = vertices[i].v;
+      }
+      vk_feedback_rect_status(&self->atlas, &hd_texture_vram,
+            ownership, &flags);
+      if (vk_feedback_diag.scaled_reads == 1)
+         vk_feedback_diag.sampled = hd_texture_vram;
+      else
+         rect_extend_bounding_box(&vk_feedback_diag.sampled,
+               &hd_texture_vram);
+      if (vk_feedback_diag.draw_detail < 128)
+      {
+         LOGI("[VKFB draw] f=%u n=%u prim=%u count=%u dither=%u semi=%u src=%u,%u,%u,%u dst=%u,%u,%u,%u uv=%u,%u;%u,%u;%u,%u;%u,%u owner=%u/%u/%u/%u flags=%04x rp=%u:%u,%u,%u,%u\n",
+               vk_feedback_diag.frame, vk_feedback_diag.draws,
+               (unsigned)self->render_state.primitive_type, count,
+               self->render_state.primitive_dither ? 1u : 0u,
+               (unsigned)self->render_state.semi_transparent,
+               hd_texture_vram.x, hd_texture_vram.y,
+               hd_texture_vram.width, hd_texture_vram.height,
+               rect.x, rect.y, rect.width, rect.height,
+               u[0], v[0], u[1], v[1], u[2], v[2], u[3], v[3],
+               ownership[0], ownership[1], ownership[2], ownership[3],
+               flags, self->atlas.renderpass.inside ? 1u : 0u,
+               self->atlas.renderpass.rect.x,
+               self->atlas.renderpass.rect.y,
+               self->atlas.renderpass.rect.width,
+               self->atlas.renderpass.rect.height);
+         vk_feedback_diag.draw_detail++;
+      }
+   }
 
    z = renderer_allocate_depth(self, scaled_read ? Domain_Scaled : Domain_Unscaled, &rect);
    vram_prov_op(self, (int)rect.x, (int)rect.y,
@@ -9538,6 +9818,17 @@ static const ClearCandidate * renderer_find_clear_candidate(Renderer *self,
 static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
 {
    RenderPassInfo_Subpass subpass;
+   if (vk_feedback_diag.scaled_reads)
+      LOGI("[VKFB renderpass] f=%u rect=%u,%u,%u,%u feedback=%u queues=%u/%u/%u/%u resolves=%u/%u\n",
+            vk_feedback_diag.frame, rect->x, rect->y,
+            rect->width, rect->height,
+            self->render_pass_is_feedback ? 1u : 0u,
+            (unsigned)BufferVertexVec_size(&self->queue.opaque),
+            (unsigned)BufferVertexVec_size(&self->queue.opaque_textured),
+            (unsigned)BufferVertexVec_size(&self->queue.semi_transparent),
+            (unsigned)BufferVertexVec_size(&self->queue.semi_transparent_opaque),
+            (unsigned)Rect2DVec_size(&self->queue.scaled_resolves),
+            (unsigned)Rect2DVec_size(&self->queue.unscaled_resolves));
    renderer_ensure_command_buffer(self);
 
    { RenderPassInfo info;
@@ -18740,6 +19031,9 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       unsigned xbegin;
       unsigned ownership;
       unsigned write_domains;
+      unsigned resolved_blocks = 0;
+      if (domain == Domain_Scaled)
+         vk_feedback_diag.sync_scaled++;
       if (fbatlas_inside_render_pass(self, rect))
          fbatlas_flush_render_pass(self);
 
@@ -18761,8 +19055,23 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
 
       /* We're asserting that a region is up to date, but it's
        * not, so we have to resolve it. */
+      if (domain == Domain_Scaled && vk_feedback_diag.sync_detail < 128)
+      {
+         unsigned counts[4];
+         unsigned flags;
+         vk_feedback_rect_status(self, rect, counts, &flags);
+         LOGI("[VKFB sync] f=%u rect=%u,%u,%u,%u dirty=%u owner=%u/%u/%u/%u flags=%04x queued=%u\n",
+               vk_feedback_diag.frame, rect->x, rect->y,
+               rect->width, rect->height,
+               (bits & dirty_bits) ? 1u : 0u,
+               counts[0], counts[1], counts[2], counts[3], flags,
+               (unsigned)Rect2DVec_size(&self->listener->queue.scaled_resolves));
+         vk_feedback_diag.sync_detail++;
+      }
       if ((bits & dirty_bits) == 0)
          return;
+      if (domain == Domain_Scaled)
+         vk_feedback_diag.sync_dirty_scaled++;
 
       /* For scaled domain,
        * we need to blit from unscaled domain to scaled. */
@@ -18810,9 +19119,12 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
                (*mask) &= ~STATUS_OWNERSHIP_MASK;
                (*mask) |= resolve_domains;
                renderer_resolve(self->listener, domain, (BLOCK_WIDTH * x) & (FB_WIDTH - 1), (BLOCK_HEIGHT * y) & (FB_HEIGHT - 1));
+               resolved_blocks++;
             }
          } }
       } }
+      if (domain == Domain_Scaled)
+         vk_feedback_diag.resolved_scaled += resolved_blocks;
       }
       }
    }
@@ -19982,6 +20294,7 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
 
       /* printf("No PSX GPU display update; duping frame\n"); */
       renderer_flush(renderer);
+      vk_feedback_end_frame(renderer);
       video_refresh_cb(NULL, prev_frame_width, prev_frame_height, 0);
 
       inside_frame = false;
@@ -20080,6 +20393,7 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
    vulkan->set_image(vulkan->handle, image, 0,
          NULL, VK_QUEUE_FAMILY_IGNORED);
    renderer_flush(renderer);
+   vk_feedback_end_frame(renderer);
 
    /* VKHOST_CORE_DUMP: readback through the core's own machinery. */
    if (getenv("VKHOST_CORE_DUMP"))
