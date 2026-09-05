@@ -5155,6 +5155,7 @@ static const DeviceFeatures *device_get_device_features(Device *self) { return &
    static void fbatlas_sync_domain(FBAtlas *self,
          Domain domain,
          const TTRect *rect);
+   static void fbatlas_refresh_scaled(FBAtlas *self, const TTRect *rect);
    static Domain fbatlas_find_suitable_domain(FBAtlas *self, const TTRect *rect);
    static void fbatlas_discard_render_pass(FBAtlas *self);
    static bool fbatlas_inside_render_pass(FBAtlas *self, const TTRect *rect);
@@ -9043,6 +9044,13 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
           * in vram coordinate avoid texture filtering and enable scaled read if
           * the texture is rendered content */
          bool texture_rendered = fbatlas_texture_rendered(&self->atlas, &hd_texture_vram);
+         if (texture_rendered)
+         {
+            TTRect texture_rect = self->atlas.renderpass.texture_window;
+            texture_rect.x += self->atlas.renderpass.texture_offset_x;
+            texture_rect.y += self->atlas.renderpass.texture_offset_y;
+            fbatlas_refresh_scaled(&self->atlas, &texture_rect);
+         }
          filtering = !texture_rendered;
          scaled_read = texture_rendered;
       }
@@ -18815,6 +18823,28 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       } }
       }
       }
+   }
+
+   static void fbatlas_refresh_scaled(FBAtlas *self, const TTRect *rect)
+   {
+      unsigned xbegin, xend, ybegin, yend;
+      if (rect->width == 0 || rect->height == 0)
+         return;
+
+      fbatlas_sync_domain(self, Domain_Unscaled, rect);
+
+      xbegin = rect->x / BLOCK_WIDTH;
+      xend = (rect->x + rect->width - 1) / BLOCK_WIDTH;
+      ybegin = rect->y / BLOCK_HEIGHT;
+      yend = (rect->y + rect->height - 1) / BLOCK_HEIGHT;
+      { unsigned y; for (y = ybegin; y <= yend; y++)
+         { unsigned x; for (x = xbegin; x <= xend; x++)
+         {
+            StatusFlags *mask = fbatlas_info(self, x, y);
+            *mask = (*mask & ~STATUS_OWNERSHIP_MASK) | STATUS_FB_ONLY;
+         } } }
+
+      fbatlas_sync_domain(self, Domain_Scaled, rect);
    }
 
    static Domain fbatlas_find_suitable_domain(FBAtlas *self, const TTRect *rect)
