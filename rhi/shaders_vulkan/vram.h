@@ -1,7 +1,11 @@
 #ifndef VRAM_H
 #define VRAM_H
 
+#if defined(UNSCALED)
 layout(location = 1) in mediump vec2 vUV;
+#else
+layout(location = 1) in highp vec2 vUV;
+#endif
 layout(location = 2) flat in mediump ivec3 vParam;
 layout(location = 3) flat in mediump ivec2 vBaseUV;
 layout(location = 4) flat in mediump ivec4 vWindow;

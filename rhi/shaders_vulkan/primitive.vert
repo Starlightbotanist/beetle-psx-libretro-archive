@@ -8,7 +8,11 @@ layout(location = 3) in mediump ivec3 Param;
 layout(location = 4) in ivec4 UV;
 layout(location = 5) in mediump uvec4 UVRange;
 
+#ifdef UNSCALED
 layout(location = 1) out mediump vec2 vUV;
+#else
+layout(location = 1) out highp vec2 vUV;
+#endif
 layout(location = 2) flat out mediump ivec3 vParam;
 layout(location = 3) flat out mediump ivec2 vBaseUV;
 layout(location = 4) flat out mediump ivec4 vWindow;
