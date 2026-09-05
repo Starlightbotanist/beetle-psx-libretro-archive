@@ -97,6 +97,7 @@ extern PFN_vkCmdClearColorImage vkCmdClearColorImage;
 extern PFN_vkCmdClearDepthStencilImage vkCmdClearDepthStencilImage;
 extern PFN_vkCmdCopyBuffer vkCmdCopyBuffer;
 extern PFN_vkCmdCopyBufferToImage vkCmdCopyBufferToImage;
+extern PFN_vkCmdCopyImage vkCmdCopyImage;
 extern PFN_vkCmdCopyImageToBuffer vkCmdCopyImageToBuffer;
 extern PFN_vkCmdDispatch vkCmdDispatch;
 extern PFN_vkCmdDraw vkCmdDraw;
@@ -252,6 +253,7 @@ static void volkGenLoadDevice(void* context,
    vkCmdClearDepthStencilImage = (PFN_vkCmdClearDepthStencilImage)load(context, "vkCmdClearDepthStencilImage");
    vkCmdCopyBuffer = (PFN_vkCmdCopyBuffer)load(context, "vkCmdCopyBuffer");
    vkCmdCopyBufferToImage = (PFN_vkCmdCopyBufferToImage)load(context, "vkCmdCopyBufferToImage");
+   vkCmdCopyImage = (PFN_vkCmdCopyImage)load(context, "vkCmdCopyImage");
    vkCmdCopyImageToBuffer = (PFN_vkCmdCopyImageToBuffer)load(context, "vkCmdCopyImageToBuffer");
    vkCmdDispatch = (PFN_vkCmdDispatch)load(context, "vkCmdDispatch");
    vkCmdDraw = (PFN_vkCmdDraw)load(context, "vkCmdDraw");
@@ -352,6 +354,7 @@ PFN_vkCmdClearColorImage vkCmdClearColorImage;
 PFN_vkCmdClearDepthStencilImage vkCmdClearDepthStencilImage;
 PFN_vkCmdCopyBuffer vkCmdCopyBuffer;
 PFN_vkCmdCopyBufferToImage vkCmdCopyBufferToImage;
+PFN_vkCmdCopyImage vkCmdCopyImage;
 PFN_vkCmdCopyImageToBuffer vkCmdCopyImageToBuffer;
 PFN_vkCmdDispatch vkCmdDispatch;
 PFN_vkCmdDraw vkCmdDraw;
@@ -5639,6 +5642,7 @@ struct OpaqueQueue
    Rect2DVec scissors;
    ClearCandidateVec clear_candidates;
    VkRect2D default_scissor;
+   TTRect scaled_read_rect;
    bool scissor_invariant;
 };
 
@@ -5666,6 +5670,7 @@ static void opaque_queue_init(struct OpaqueQueue *q)
 #undef OQ_VEC_ZERO
    q->default_scissor.offset.x = 0; q->default_scissor.offset.y = 0;
    q->default_scissor.extent.width = 0; q->default_scissor.extent.height = 0;
+   q->scaled_read_rect = make_rect(0, 0, 0, 0);
    q->scissor_invariant = false;
 }
 
@@ -5810,6 +5815,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
          FilterExclude polygon_2d_filter_exclude;
          ImageHandle scaled_framebuffer;
          ImageHandle scaled_framebuffer_msaa;
+         ImageHandle scaled_read_framebuffer;
          ImageHandle bias_framebuffer;
          ImageHandle framebuffer;
          ImageHandle framebuffer_ssaa;
@@ -6580,6 +6586,7 @@ static void renderer_init(Renderer *self,
    self->quad.data                    = NULL;
    self->scaled_framebuffer.data      = NULL;
    self->scaled_framebuffer_msaa.data = NULL;
+   self->scaled_read_framebuffer.data = NULL;
    self->bias_framebuffer.data        = NULL;
    self->framebuffer.data             = NULL;
    self->framebuffer_ssaa.data        = NULL;
@@ -9063,6 +9070,25 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    vram_prov_op(self, (int)rect.x, (int)rect.y,
          (int)rect.width, (int)rect.height, 1);
 
+   if (scaled_read && hd_texture_vram.height > 0)
+   {
+      TTRect *read = &self->queue.scaled_read_rect;
+      unsigned x1 = min_(hd_texture_vram.x + hd_texture_vram.width + 1, FB_WIDTH);
+      unsigned y1 = min_(hd_texture_vram.y + hd_texture_vram.height, FB_HEIGHT);
+
+      if (read->width == 0 || read->height == 0)
+         *read = make_rect(hd_texture_vram.x, hd_texture_vram.y,
+               x1 - hd_texture_vram.x, y1 - hd_texture_vram.y);
+      else
+      {
+         unsigned x0 = min_(read->x, hd_texture_vram.x);
+         unsigned y0 = min_(read->y, hd_texture_vram.y);
+         x1 = max_(read->x + read->width, x1);
+         y1 = max_(read->y + read->height, y1);
+         *read = make_rect(x0, y0, x1 - x0, y1 - y0);
+      }
+   }
+
    /* Look up the hd texture index This is done here at the end of the function
     * because the `allocate_depth` call above can call `reset_queue` which would
     * invalidate the HdTextureHandle */
@@ -9535,10 +9561,82 @@ static const ClearCandidate * renderer_find_clear_candidate(Renderer *self,
    return ret;
 }
 
+static void renderer_copy_scaled_read_framebuffer(Renderer *self)
+{
+   const TTRect *rect = &self->queue.scaled_read_rect;
+   Image *src;
+   Image *dst;
+   VkImageCopy copy;
+
+   if (rect->width == 0 || rect->height == 0)
+      return;
+
+   if (!ih_is_valid(&self->scaled_read_framebuffer))
+   {
+      ImageCreateInfo info = image_create_info_render_target(
+            FB_WIDTH * self->scaling, FB_HEIGHT * self->scaling,
+            self->scaled_fb_format);
+      info.samples = (VkSampleCountFlagBits)self->msaa;
+      info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+      ih_move(&self->scaled_read_framebuffer,
+            device_create_image(self->device, &info, NULL));
+      if (!ih_is_valid(&self->scaled_read_framebuffer))
+         return;
+      image_set_layout(ih_get(&self->scaled_read_framebuffer), Layout_General);
+   }
+
+   src = self->msaa > 1 ? ih_get(&self->scaled_framebuffer_msaa) :
+         ih_get(&self->scaled_framebuffer);
+   dst = ih_get(&self->scaled_read_framebuffer);
+
+   commandbuffer_image_barrier(cbh_get(&self->cmd), src,
+         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+   commandbuffer_image_barrier(cbh_get(&self->cmd), dst,
+         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+
+   memset(&copy, 0, sizeof(copy));
+   copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+   copy.srcSubresource.layerCount = 1;
+   copy.srcOffset.x = (int32_t)(rect->x * self->scaling);
+   copy.srcOffset.y = (int32_t)(rect->y * self->scaling);
+   copy.dstSubresource = copy.srcSubresource;
+   copy.dstOffset = copy.srcOffset;
+   copy.extent.width = rect->width * self->scaling;
+   copy.extent.height = rect->height * self->scaling;
+   copy.extent.depth = 1;
+   vkCmdCopyImage(cbh_get(&self->cmd)->cmd,
+         image_get_image(src), VK_IMAGE_LAYOUT_GENERAL,
+         image_get_image(dst), VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+
+   commandbuffer_image_barrier(cbh_get(&self->cmd), src,
+         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+         VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+   commandbuffer_image_barrier(cbh_get(&self->cmd), dst,
+         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+}
+
+static ImageView *renderer_get_scaled_read_view(Renderer *self)
+{
+   if (ih_is_valid(&self->scaled_read_framebuffer))
+      return image_get_view(ih_get(&self->scaled_read_framebuffer));
+   if (self->msaa > 1)
+      return image_get_view(ih_get(&self->scaled_framebuffer_msaa));
+   return iv_get(imageview_vec_at(&self->scaled_views, 0));
+}
+
 static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
 {
    RenderPassInfo_Subpass subpass;
    renderer_ensure_command_buffer(self);
+   renderer_copy_scaled_read_framebuffer(self);
 
    { RenderPassInfo info;
    render_pass_info_defaults(&info);
@@ -9631,12 +9729,8 @@ static void renderer_dispatch_set_scaled_read_texture(Renderer *self,
       bool textured)
 {
    if (scaled_read)
-   {
-      if (self->msaa > 1)
-         commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->scaled_framebuffer_msaa)), StockSampler_NearestClamp);
-      else
-         commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, iv_get(imageview_vec_at(&self->scaled_views, 0)), StockSampler_NearestClamp);
-   }
+      commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0,
+            renderer_get_scaled_read_view(self), StockSampler_NearestClamp);
    else
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer)), StockSampler_NearestClamp);
    if (textured)
@@ -10444,6 +10538,7 @@ static void renderer_fini(Renderer *self)
     * teardown, which a plain struct no longer provides). */
    ih_reset(&self->scaled_framebuffer);
    ih_reset(&self->scaled_framebuffer_msaa);
+   ih_reset(&self->scaled_read_framebuffer);
    ih_reset(&self->bias_framebuffer);
    ih_reset(&self->framebuffer);
    ih_reset(&self->framebuffer_ssaa);
@@ -10506,6 +10601,7 @@ static void renderer_reset_queue(Renderer *self)
    ClearCandidateVec_clear(&self->queue.clear_candidates);
    self->primitive_index = 0;
    self->render_pass_is_feedback = false;
+   self->queue.scaled_read_rect = make_rect(0, 0, 0, 0);
 
    renderer_reset_scissor_queue(self);
 
@@ -10517,12 +10613,8 @@ static void renderer_reset_queue(Renderer *self)
 static void renderer_semi_transparent_set_state(Renderer *self,
       const SemiTransparentState *state){
    if (state->scaled_read)
-   {
-      if (self->msaa > 1)
-         commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->scaled_framebuffer_msaa)), StockSampler_NearestClamp);
-      else
-         commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, iv_get(imageview_vec_at(&self->scaled_views, 0)), StockSampler_NearestClamp);
-   }
+      commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0,
+            renderer_get_scaled_read_view(self), StockSampler_NearestClamp);
    else
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer)), StockSampler_NearestClamp);
    renderer_hd_texture_uniforms(self, state->hd_texture_index);
