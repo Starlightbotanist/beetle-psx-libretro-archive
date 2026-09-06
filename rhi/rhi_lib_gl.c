@@ -8074,7 +8074,7 @@ static void gl_mirror_fb_out_to_fb_texture(gl_renderer *renderer,
    gl_blit_fb_out(renderer, &renderer->fb_texture, 1, x, y, w, h);
 
    if (allow_with_software_fb)
-      glFinish();
+      glFlush();
 }
 
 static void gl_copy_fb_out_to_feedback(gl_renderer *renderer,
