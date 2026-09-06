@@ -145,6 +145,22 @@ static CPU_DiagBIOSHistory cpu_diag_bios_history[CPU_DIAG_BIOS_HISTORY_SIZE];
 static unsigned cpu_diag_bios_history_pos;
 static unsigned cpu_diag_bios_history_count;
 
+#define CPU_DIAG_PRINTF_HISTORY_SIZE 128
+typedef struct
+{
+   uint32_t format_address;
+   uint32_t a1;
+   uint32_t a2;
+   uint32_t a3;
+   uint32_t sp;
+   uint32_t ra;
+   char format[96];
+} CPU_DiagPrintfHistory;
+
+static CPU_DiagPrintfHistory cpu_diag_printf_history[CPU_DIAG_PRINTF_HISTORY_SIZE];
+static unsigned cpu_diag_printf_history_pos;
+static unsigned cpu_diag_printf_history_count;
+
 void CPU_DiagArm(void)
 {
    cpu_diag_exceptions = 0;
@@ -153,6 +169,8 @@ void CPU_DiagArm(void)
    cpu_diag_exit_dumped = false;
    cpu_diag_bios_history_pos = 0;
    cpu_diag_bios_history_count = 0;
+   cpu_diag_printf_history_pos = 0;
+   cpu_diag_printf_history_count = 0;
    cpu_diag_prev_valid = false;
    cpu_diag_armed = true;
    log_cb(RETRO_LOG_INFO, "[CPUDIAG] armed\n");
@@ -163,6 +181,7 @@ static void CPU_DiagTrace(uint32_t pc, uint32_t instr,
 {
    CPU_DiagHistory *entry;
    CPU_DiagBIOSHistory *bios_entry;
+   CPU_DiagPrintfHistory *printf_entry;
    uint32_t phys_pc;
    unsigned i;
 
@@ -203,6 +222,30 @@ static void CPU_DiagTrace(uint32_t pc, uint32_t instr,
       }
    }
 
+   if(phys_pc == 0xA0 && gpr[9] == 0x3F)
+   {
+      printf_entry = &cpu_diag_printf_history[cpu_diag_printf_history_pos];
+      printf_entry->format_address = gpr[4];
+      printf_entry->a1 = gpr[5];
+      printf_entry->a2 = gpr[6];
+      printf_entry->a3 = gpr[7];
+      printf_entry->sp = gpr[29];
+      printf_entry->ra = gpr[31];
+      for(i = 0; i < sizeof(printf_entry->format) - 1; i++)
+      {
+         uint8_t c = PSX_MemPeek8(gpr[4] + i);
+
+         if(!c)
+            break;
+         printf_entry->format[i] = c >= 0x20 && c < 0x7F ? c : ' ';
+      }
+      printf_entry->format[i] = 0;
+      cpu_diag_printf_history_pos = (cpu_diag_printf_history_pos + 1) %
+            CPU_DIAG_PRINTF_HISTORY_SIZE;
+      if(cpu_diag_printf_history_count < CPU_DIAG_PRINTF_HISTORY_SIZE)
+         cpu_diag_printf_history_count++;
+   }
+
    cpu_diag_prev_pc = pc;
    cpu_diag_prev_instr = instr;
    cpu_diag_prev_valid = true;
@@ -219,6 +262,22 @@ static void CPU_DiagTrace(uint32_t pc, uint32_t instr,
       return;
 
    cpu_diag_exit_dumped = true;
+   log_cb(RETRO_LOG_INFO, "[PRINTFDIAG] history=%u\n",
+         cpu_diag_printf_history_count);
+   for(i = 0; i < cpu_diag_printf_history_count; i++)
+   {
+      unsigned slot = (cpu_diag_printf_history_pos +
+            CPU_DIAG_PRINTF_HISTORY_SIZE - cpu_diag_printf_history_count + i) %
+            CPU_DIAG_PRINTF_HISTORY_SIZE;
+      const CPU_DiagPrintfHistory *h = &cpu_diag_printf_history[slot];
+
+      log_cb(RETRO_LOG_INFO,
+            "[PRINTFDIAG] seq=%u format_address=%08x format=\"%s\" "
+            "a1=%08x a2=%08x a3=%08x sp=%08x ra=%08x\n",
+            i, h->format_address, h->format, h->a1, h->a2, h->a3,
+            h->sp, h->ra);
+   }
+
    log_cb(RETRO_LOG_INFO, "[BIOSDIAG] history=%u\n",
          cpu_diag_bios_history_count);
    for(i = 0; i < cpu_diag_bios_history_count; i++)
