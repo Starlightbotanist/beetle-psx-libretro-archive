@@ -104,7 +104,7 @@ void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned cou
 			 * Case 2: U is decreasing in Y, but no change in X.
 			 * Case 3: V is decreasing in X, but no change in Y.
 			 * Case 4: V is decreasing in Y, but no change in X. */
-			if (false)
+			if (rhi_intf_is_type() != RHI_VULKAN || psx_gpu_upscale_shift_hw)
 			{
 				if (neg_dudx && zero_dudy)
 					off_u = 1;

@@ -62,6 +62,9 @@ void main()
 {
 	float opacity = 1.0;
 #ifdef TEXTURED
+	FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+	return;
+
 	vec4 NNColor;
 
 	bool fastpath = (vParam.z & 0x100) != 0;
