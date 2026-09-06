@@ -497,6 +497,8 @@ retro_log_printf_t libretro_log;
 #define LOGE(...) do { if (libretro_log) libretro_log(RETRO_LOG_ERROR, __VA_ARGS__); } while(0)
 #define LOGI(...) do { if (libretro_log) libretro_log(RETRO_LOG_INFO, __VA_ARGS__); } while(0)
 
+static unsigned vk_crop_diag_frame;
+
 #ifdef _MSC_VER
 #endif
 
@@ -8380,6 +8382,19 @@ static ImageHandle renderer_scanout_to_texture(Renderer *self)
    unsigned render_scale = scaled ? self->scaling : 1;
 
    DisplayRect display_rect = renderer_compute_display_rect(self);
+
+   if (self->render_state.crop_overscan == 2 && vk_crop_diag_frame < 600)
+   {
+      LOGI("[VK crop] frame=%u mode=%u pal=%u 480i=%u vrange=%d,%d "
+            "scanlines=%d,%d fb=%d,%d,%u,%u display=%d,%d,%u,%u\n",
+            vk_crop_diag_frame++, (unsigned)self->render_state.width_mode,
+            self->render_state.is_pal, self->render_state.is_480i,
+            self->render_state.vert_start, self->render_state.vert_end,
+            self->render_state.slstart, self->render_state.slend,
+            rect->x, rect->y, rect->width, rect->height,
+            display_rect.x, display_rect.y,
+            display_rect.width, display_rect.height);
+   }
 
    /* Analog wants a wide intermediate: the chain reads this back as a signal,
     * and a UNORM target would clamp the overshoot before it ever reaches the
