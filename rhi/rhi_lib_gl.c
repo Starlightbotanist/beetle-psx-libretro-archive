@@ -1053,7 +1053,7 @@ struct gl_renderer {
       uint64_t native_pixels;
       uint64_t source_pixels;
       uint64_t mirror_us;
-      uint64_t finish_us;
+      uint64_t completion_us;
       unsigned primitives;
       unsigned textured;
       unsigned dependencies;
@@ -6376,7 +6376,7 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
             "[GL feedback perf] frame=%llu primitives=%u textured=%u "
             "dependencies=%u draw_flushes=%u mirrors=%u dependency_mirrors=%u "
             "native_pixels=%llu source_pixels=%llu max_native_pixels=%u "
-            "mirror_us=%llu finish_us=%llu\n",
+            "mirror_us=%llu completion=flush completion_us=%llu\n",
             (unsigned long long)renderer->vram_sync_diag.frame,
             renderer->vram_sync_diag.primitives,
             renderer->vram_sync_diag.textured,
@@ -6388,13 +6388,13 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
             (unsigned long long)renderer->vram_sync_diag.source_pixels,
             renderer->vram_sync_diag.max_native_pixels,
             (unsigned long long)renderer->vram_sync_diag.mirror_us,
-            (unsigned long long)renderer->vram_sync_diag.finish_us);
+            (unsigned long long)renderer->vram_sync_diag.completion_us);
 
    renderer->vram_sync_diag.frame++;
    renderer->vram_sync_diag.native_pixels = 0;
    renderer->vram_sync_diag.source_pixels = 0;
    renderer->vram_sync_diag.mirror_us = 0;
-   renderer->vram_sync_diag.finish_us = 0;
+   renderer->vram_sync_diag.completion_us = 0;
    renderer->vram_sync_diag.primitives = 0;
    renderer->vram_sync_diag.textured = 0;
    renderer->vram_sync_diag.dependencies = 0;
@@ -7895,7 +7895,7 @@ static void gl_mirror_fb_out_to_fb_texture(gl_renderer *renderer,
    /* Some drivers do not make dependency-driven framebuffer mirrors visible
     * to the following texture fetch without explicit completion. */
    if (allow_with_software_fb)
-      glFinish();
+      glFlush();
    end = cpu_features_get_time_usec();
 
    renderer->vram_sync_diag.mirrors++;
@@ -7906,7 +7906,7 @@ static void gl_mirror_fb_out_to_fb_texture(gl_renderer *renderer,
    if (allow_with_software_fb)
    {
       renderer->vram_sync_diag.dependency_mirrors++;
-      renderer->vram_sync_diag.finish_us += end - before_finish;
+      renderer->vram_sync_diag.completion_us += end - before_finish;
    }
    if (native_pixels > renderer->vram_sync_diag.max_native_pixels)
       renderer->vram_sync_diag.max_native_pixels = native_pixels;
