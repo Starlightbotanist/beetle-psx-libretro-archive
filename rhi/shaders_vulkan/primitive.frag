@@ -63,14 +63,6 @@ void main()
 	float opacity = 1.0;
 #ifdef TEXTURED
 	vec4 NNColor;
-	vec2 sample_uv = vUV;
-	if (SCALE > 1)
-	{
-		float scale = float(SCALE);
-		vec2 center = (floor(gl_FragCoord.xy / scale) + vec2(0.5)) * scale;
-		vec2 delta = center - gl_FragCoord.xy;
-		sample_uv += dFdx(vUV) * delta.x + dFdy(vUV) * delta.y;
-	}
 
 	bool fastpath = (vParam.z & 0x100) != 0;
 	bool hd_enabled = !fastpath && (vParam.z & 0x200) == 0;
@@ -78,11 +70,11 @@ void main()
 
 	vec4 hdColor;
 	if (fastpath) {
-		NNColor = sample_hd_fast(sample_uv);
-	} else if (hd_enabled && sample_hd_texture_nearest_hack(sample_uv, hdColor)) {
+		NNColor = sample_hd_fast(vUV);
+	} else if (hd_enabled && sample_hd_texture_nearest_hack(vUV, hdColor)) {
 		NNColor = hdColor;
 	} else {
-		NNColor = sample_vram_atlas(sample_uv);
+		NNColor = sample_vram_atlas(vUV);
 	}
 
 	// Even for opaque draw calls, this pixel is transparent.
@@ -116,7 +108,7 @@ void main()
 	// hd texture filtering
 	if (hd_enabled) {
 		bool valid = true;
-		vec4 hd_color = sample_hd_texture_trilinear(sample_uv, valid);
+		vec4 hd_color = sample_hd_texture_trilinear(vUV, valid);
 		if (valid) {
 			color = hd_color;
 			opacity = hd_color.a;

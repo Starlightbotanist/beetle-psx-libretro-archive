@@ -42,15 +42,7 @@ layout(location = 6) in mediump vec4 vFog;
 void main()
 {
 #ifdef TEXTURED
-	vec2 sample_uv = vUV;
-	if (SCALE > 1)
-	{
-		float scale = float(SCALE);
-		vec2 center = (floor(gl_FragCoord.xy / scale) + vec2(0.5)) * scale;
-		vec2 delta = center - gl_FragCoord.xy;
-		sample_uv += dFdx(vUV) * delta.x + dFdy(vUV) * delta.y;
-	}
-	vec4 NNColor = sample_vram_atlas(sample_uv);
+	vec4 NNColor = sample_vram_atlas(vUV);
 	if (all(equal(NNColor, vec4(0.0))))
 		discard;
 	vec4 color = NNColor;
