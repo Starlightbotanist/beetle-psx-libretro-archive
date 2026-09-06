@@ -12,6 +12,7 @@
 extern retro_log_printf_t log_cb;
 extern void CPU_DiagArm(void);
 extern void DMA_DiagArm(void);
+extern void IRQ_DiagArm(void);
 
 /* ------------------------------------------------------------------------------ */
 /*  Locals */
@@ -943,6 +944,7 @@ void input_update(bool libretro_supports_bitmasks, retro_input_state_t input_sta
             {
                CPU_DiagArm();
                DMA_DiagArm();
+               IRQ_DiagArm();
             }
             diag_down = down;
             diag_cross = cross;

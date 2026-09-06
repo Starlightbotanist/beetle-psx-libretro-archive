@@ -28,6 +28,30 @@
 static uint16_t Asserted;
 static uint16_t Mask;
 static uint16_t Status;
+static bool irq_diag_armed;
+static unsigned irq_diag_events;
+
+extern retro_log_printf_t log_cb;
+
+void IRQ_DiagArm(void)
+{
+   irq_diag_armed = true;
+   irq_diag_events = 0;
+   log_cb(RETRO_LOG_INFO, "[IRQDIAG] armed\n");
+}
+
+static void IRQ_DiagLog(const char *event, int which, bool level,
+      uint32_t address, uint32_t value)
+{
+   if(!irq_diag_armed || irq_diag_events >= 2048)
+      return;
+
+   log_cb(RETRO_LOG_INFO,
+         "[IRQDIAG] seq=%u event=%s which=%d level=%d addr=%08x "
+         "value=%08x asserted=%04x status=%04x mask=%04x pending=%04x\n",
+         irq_diag_events++, event, which, level, address, value,
+         Asserted, Status, Mask, Status & Mask);
+}
 
 void IRQ_Power(void)
 {
@@ -69,6 +93,9 @@ void IRQ_Assert(int which, bool status)
       Status   |= (old_Asserted ^ Asserted) & Asserted;
    }
 
+   if(old_Asserted != Asserted)
+      IRQ_DiagLog("assert", which, status, 0, 0);
+
    CPU_AssertIRQ(0, (bool)(Status & Mask));
 }
 
@@ -82,6 +109,8 @@ void IRQ_Write(uint32_t A, uint32_t V)
       Mask = V;
    else
       Status &= V;
+
+   IRQ_DiagLog(A & 4 ? "mask_write" : "status_write", -1, false, A, V);
 
    CPU_AssertIRQ(0, (bool)(Status & Mask));
 }
