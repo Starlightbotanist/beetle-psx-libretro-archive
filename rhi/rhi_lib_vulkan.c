@@ -5639,6 +5639,7 @@ struct OpaqueQueue
 
    Rect2DVec scaled_resolves;
    Rect2DVec unscaled_resolves;
+   Rect2DVec scaled_texture_reads;
    BlitInfoVec scaled_blits;
    BlitInfoVec scaled_masked_blits;
    BlitInfoVec unscaled_blits;
@@ -5665,6 +5666,7 @@ static void opaque_queue_init(struct OpaqueQueue *q)
    OQ_VEC_ZERO(q->semi_transparent_state);
    OQ_VEC_ZERO(q->scaled_resolves);
    OQ_VEC_ZERO(q->unscaled_resolves);
+   OQ_VEC_ZERO(q->scaled_texture_reads);
    OQ_VEC_ZERO(q->scaled_blits);
    OQ_VEC_ZERO(q->scaled_masked_blits);
    OQ_VEC_ZERO(q->unscaled_blits);
@@ -9551,33 +9553,14 @@ static const ClearCandidate * renderer_find_clear_candidate(Renderer *self,
    return ret;
 }
 
-static bool renderer_queue_has_scaled_read(const Renderer *self)
-{
-   unsigned i;
-   for (i = 0; i < PrimitiveInfoVec_size((PrimitiveInfoVec *)&self->queue.opaque_textured_scissor); i++)
-      if (PrimitiveInfoVec_at((PrimitiveInfoVec *)&self->queue.opaque_textured_scissor, i)->scaled_read)
-         return true;
-   for (i = 0; i < PrimitiveInfoVec_size((PrimitiveInfoVec *)&self->queue.semi_transparent_opaque_scissor); i++)
-      if (PrimitiveInfoVec_at((PrimitiveInfoVec *)&self->queue.semi_transparent_opaque_scissor, i)->scaled_read)
-         return true;
-   for (i = 0; i < SemiTransparentStateVec_size((SemiTransparentStateVec *)&self->queue.semi_transparent_state); i++)
-      if (SemiTransparentStateVec_at((SemiTransparentStateVec *)&self->queue.semi_transparent_state, i)->scaled_read)
-         return true;
-   return false;
-}
-
 static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
 {
    RenderPassInfo_Subpass subpass;
    renderer_ensure_command_buffer(self);
 
-   if (self->msaa == 1 && renderer_queue_has_scaled_read(self))
+   if (self->msaa == 1 && !Rect2DVec_empty(&self->queue.scaled_texture_reads))
    {
-      VkOffset3D origin = { 0, 0, 0 };
-      VkOffset3D extent = {
-         (int32_t)(FB_WIDTH * self->scaling),
-         (int32_t)(FB_HEIGHT * self->scaling), 1
-      };
+      unsigned i;
 
       renderer_flush_blits(self);
       renderer_flush_resolves(self);
@@ -9591,11 +9574,23 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
-      commandbuffer_blit_image(cbh_get(&self->cmd),
-            ih_get(&self->scaled_read_snapshot),
-            ih_get(&self->scaled_framebuffer),
-            &origin, &extent, &origin, &extent,
-            0, 0, 0, 0, 1, VK_FILTER_NEAREST);
+      for (i = 0; i < Rect2DVec_size(&self->queue.scaled_texture_reads); i++)
+      {
+         const VkRect2D *rect = Rect2DVec_at(&self->queue.scaled_texture_reads, i);
+         VkOffset3D offset = {
+            rect->offset.x * (int32_t)self->scaling,
+            rect->offset.y * (int32_t)self->scaling, 0
+         };
+         VkOffset3D extent = {
+            (int32_t)(rect->extent.width * self->scaling),
+            (int32_t)(rect->extent.height * self->scaling), 1
+         };
+         commandbuffer_blit_image(cbh_get(&self->cmd),
+               ih_get(&self->scaled_read_snapshot),
+               ih_get(&self->scaled_framebuffer),
+               &offset, &extent, &offset, &extent,
+               0, 0, 0, 0, 1, VK_FILTER_NEAREST);
+      }
       commandbuffer_image_barrier(cbh_get(&self->cmd),
             ih_get(&self->scaled_read_snapshot),
             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
@@ -10543,6 +10538,7 @@ static void renderer_fini(Renderer *self)
    SemiTransparentStateVec_free_storage(&self->queue.semi_transparent_state);
    Rect2DVec_free_storage(&self->queue.scaled_resolves);
    Rect2DVec_free_storage(&self->queue.unscaled_resolves);
+   Rect2DVec_free_storage(&self->queue.scaled_texture_reads);
    BlitInfoVec_free_storage(&self->queue.scaled_blits);
    BlitInfoVec_free_storage(&self->queue.scaled_masked_blits);
    BlitInfoVec_free_storage(&self->queue.unscaled_blits);
@@ -10575,6 +10571,7 @@ static void renderer_reset_queue(Renderer *self)
    BufferVertexVec_clear(&self->queue.semi_transparent_opaque);
    PrimitiveInfoVec_clear(&self->queue.semi_transparent_opaque_scissor);
    ClearCandidateVec_clear(&self->queue.clear_candidates);
+   Rect2DVec_clear(&self->queue.scaled_texture_reads);
    self->primitive_index = 0;
    self->render_pass_is_feedback = false;
 
@@ -18640,6 +18637,34 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       fbatlas_read_domain(self, domain, Stage_Fragment, rect);
    }
 
+static void fbatlas_queue_scaled_texture_read(FBAtlas *self,
+      const TTRect *rect)
+{
+   unsigned x[2], y[2], width[2], height[2];
+   unsigned nx, ny, i, j;
+
+   x[0] = rect->x & (FB_WIDTH - 1);
+   y[0] = rect->y & (FB_HEIGHT - 1);
+   width[0] = min_(rect->width, FB_WIDTH - x[0]);
+   height[0] = min_(rect->height, FB_HEIGHT - y[0]);
+   nx = rect->width > width[0] ? 2 : 1;
+   ny = rect->height > height[0] ? 2 : 1;
+   x[1] = 0;
+   y[1] = 0;
+   width[1] = rect->width - width[0];
+   height[1] = rect->height - height[0];
+
+   for (j = 0; j < ny; j++)
+      for (i = 0; i < nx; i++)
+      {
+         VkRect2D copy = {
+            { (int32_t)x[i], (int32_t)y[j] },
+            { width[i], height[j] }
+         };
+         Rect2DVec_push(&self->listener->queue.scaled_texture_reads, &copy);
+      }
+}
+
    static void fbatlas_read_texture(FBAtlas *self, Domain domain,
          bool read_palette)
    {
@@ -18658,6 +18683,9 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       }
       shifted.x += self->renderpass.texture_offset_x;
       shifted.y += self->renderpass.texture_offset_y;
+
+      if (domain == Domain_Scaled)
+         fbatlas_queue_scaled_texture_read(self, &shifted);
 
       /* Domain domain = palette ? Domain_Unscaled : fbatlas_find_suitable_domain(self, shifted); */
       fbatlas_sync_domain(self, domain, &shifted);
