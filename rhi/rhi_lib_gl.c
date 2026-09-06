@@ -3424,6 +3424,8 @@ static bool gl_renderer_new(gl_renderer *renderer, gl_draw_config config)
       uint32_t fixed_point_modulation = !psx_pgxp_color;
 
       glUseProgram(command_buffer->program->id);
+      glUniform1ui(gl_uniform_map_get(&command_buffer->program->uniforms,
+               "internal_upscaling"), upscaling);
       glUniform1ui(gl_uniform_map_get(&command_buffer->program->uniforms, "dither_scaling"), dither_scaling);
       glUniform1ui(gl_uniform_map_get(&command_buffer->program->uniforms,
                "fixed_point_modulation"), fixed_point_modulation);
@@ -4855,6 +4857,8 @@ static bool retro_refresh_variables(gl_renderer *renderer)
       uint32_t fixed_point_modulation = !psx_pgxp_color;
 
       glUseProgram(renderer->command_buffer->program->id);
+      glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms,
+               "internal_upscaling"), upscaling);
       glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "dither_scaling"), dither_scaling);
       glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms,
                "fixed_point_modulation"), fixed_point_modulation);
