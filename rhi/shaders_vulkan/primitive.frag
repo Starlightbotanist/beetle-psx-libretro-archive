@@ -64,12 +64,13 @@ void main()
 #ifdef TEXTURED
 	vec4 NNColor;
 	vec2 sample_uv = vUV;
-#ifndef UNSCALED
-	float scale = float(SCALE);
-	vec2 origin = floor(gl_FragCoord.xy / scale) * scale;
-	vec2 delta = origin - gl_FragCoord.xy;
-	sample_uv += dFdx(vUV) * delta.x + dFdy(vUV) * delta.y;
-#endif
+	if (SCALE > 1)
+	{
+		float scale = float(SCALE);
+		vec2 origin = floor(gl_FragCoord.xy / scale) * scale;
+		vec2 delta = origin - gl_FragCoord.xy;
+		sample_uv += dFdx(vUV) * delta.x + dFdy(vUV) * delta.y;
+	}
 
 	bool fastpath = (vParam.z & 0x100) != 0;
 	bool hd_enabled = !fastpath && (vParam.z & 0x200) == 0;

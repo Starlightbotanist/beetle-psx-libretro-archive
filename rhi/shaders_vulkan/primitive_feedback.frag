@@ -43,12 +43,13 @@ void main()
 {
 #ifdef TEXTURED
 	vec2 sample_uv = vUV;
-#ifndef UNSCALED
-	float scale = float(SCALE);
-	vec2 origin = floor(gl_FragCoord.xy / scale) * scale;
-	vec2 delta = origin - gl_FragCoord.xy;
-	sample_uv += dFdx(vUV) * delta.x + dFdy(vUV) * delta.y;
-#endif
+	if (SCALE > 1)
+	{
+		float scale = float(SCALE);
+		vec2 origin = floor(gl_FragCoord.xy / scale) * scale;
+		vec2 delta = origin - gl_FragCoord.xy;
+		sample_uv += dFdx(vUV) * delta.x + dFdy(vUV) * delta.y;
+	}
 	vec4 NNColor = sample_vram_atlas(sample_uv);
 	if (all(equal(NNColor, vec4(0.0))))
 		discard;

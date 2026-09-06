@@ -6,10 +6,10 @@ layout(location = 2) flat in mediump ivec3 vParam;
 layout(location = 3) flat in mediump ivec2 vBaseUV;
 layout(location = 4) flat in mediump ivec4 vWindow;
 layout(location = 5) flat in mediump ivec4 vTexLimits;
+layout(constant_id = 3) const int SCALE = 1;
 #if defined(UNSCALED)
 layout(set = 0, binding = 0) uniform mediump usampler2D uFramebuffer;
 #else
-layout(constant_id = 3) const int SCALE = 1;
 #if defined(MSAA)
 layout(set = 0, binding = 0) uniform mediump sampler2DMS uFramebufferMS;
 #else
