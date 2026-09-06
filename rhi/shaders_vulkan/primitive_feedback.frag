@@ -45,9 +45,6 @@ void main()
 	vec4 NNColor = sample_vram_atlas(vUV);
 	if (all(equal(NNColor, vec4(0.0))))
 		discard;
-	FragColor = vec4(0.0, 1.0, 1.0, 1.0);
-	return;
-
 	vec4 color = NNColor;
 
 	vec3 shaded_hot = color.rgb * ((PGXP_FOG != 0) ? pgxp_fog_mix(vColor.rgb, vFog) : vColor.rgb) * (255.0 / 128.0);
@@ -69,11 +66,6 @@ void main()
 
 	if (MASK_TEST != 0 && fbcolor.a > 0.5)
 		discard;
-
-#ifndef TEXTURED
-	FragColor = vec4(1.0, 1.0, 0.0, 1.0);
-	return;
-#endif
 
 	vec3 blended;
 	if (BLEND_MODE == BLEND_ADD)
