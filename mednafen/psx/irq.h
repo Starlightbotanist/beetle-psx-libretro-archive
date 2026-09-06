@@ -23,6 +23,7 @@ void IRQ_Assert(int which, bool asserted);
 
 void IRQ_Write(uint32_t A, uint32_t V);
 uint32_t IRQ_Read(uint32_t A);
+void IRQ_DiagState(uint16_t *asserted, uint16_t *status, uint16_t *mask);
 
 int IRQ_StateAction(void *data, int load, int data_only);
 

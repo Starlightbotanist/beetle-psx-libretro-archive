@@ -100,3 +100,10 @@ uint32_t IRQ_Read(uint32_t A)
 
    return(ret);
 }
+
+void IRQ_DiagState(uint16_t *asserted, uint16_t *status, uint16_t *mask)
+{
+   *asserted = Asserted;
+   *status = Status;
+   *mask = Mask;
+}

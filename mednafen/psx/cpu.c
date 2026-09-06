@@ -846,19 +846,23 @@ static INLINE uint32_t ReadInstruction(int32_t *timestamp, uint32_t address)
 static uint32_t NO_INLINE CPU_Exception(uint32_t code, uint32_t PC, const uint32_t NP, const uint32_t instr)
 {
    uint32_t handler = 0x80000080;
+   uint16_t irq_asserted;
+   uint16_t irq_status;
+   uint16_t irq_mask;
 
    assert(code < 16);
 
    if(cpu_diag_armed && cpu_diag_exceptions < 256 &&
          (code != EXCEPTION_INT || PC < 0x80000000 || PC >= 0xBFC00000))
    {
+      IRQ_DiagState(&irq_asserted, &irq_status, &irq_mask);
       log_cb(RETRO_LOG_INFO,
             "[CPUDIAG] seq=%u code=%u pc=%08x np=%08x instr=%08x "
             "sr=%08x cause=%08x epc=%08x bdbt=%u ra=%08x sp=%08x "
-            "k0=%08x k1=%08x\n",
+            "k0=%08x k1=%08x irq=%04x stat=%04x mask=%04x\n",
             cpu_diag_exceptions++, code, PC, NP, instr, CP0.SR,
             CP0.CAUSE, CP0.EPC, BDBT, GPR[31], GPR[29], GPR[26],
-            GPR[27]);
+            GPR[27], irq_asserted, irq_status, irq_mask);
    }
 
    if (CP0.SR & (1 << 22)) /* BEV */
