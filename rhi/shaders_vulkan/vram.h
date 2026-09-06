@@ -70,9 +70,12 @@ vec4 sample_vram_atlas(vec2 uvv)
 #if defined(UNSCALED)
     return abgr1555(texelFetch(uFramebuffer, coord & FB_MASK, 0).x);
 #elif defined(MSAA)
-    return texelFetch(uFramebufferMS, ivec2(mod(coord, FB_SIZE) * SCALE), gl_SampleID);
+    return texelFetch(uFramebufferMS,
+        (ivec2(coord) & FB_MASK) * SCALE + ivec2(SCALE / 2),
+        gl_SampleID);
 #else
-    return texelFetch(uFramebuffer, ivec2(mod(coord, FB_SIZE) * SCALE), 0);
+    return texelFetch(uFramebuffer,
+        (ivec2(coord) & FB_MASK) * SCALE + ivec2(SCALE / 2), 0);
 #endif
 }
 

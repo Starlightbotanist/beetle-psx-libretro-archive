@@ -42,12 +42,6 @@ layout(location = 6) in mediump vec4 vFog;
 void main()
 {
 #ifdef TEXTURED
-#ifdef UNSCALED
-	FragColor = vec4(0.0, 1.0, 1.0, 1.0);
-#else
-	FragColor = vec4(1.0, 0.0, 1.0, 1.0);
-#endif
-	return;
 	vec4 NNColor = sample_vram_atlas(vUV);
 	if (all(equal(NNColor, vec4(0.0))))
 		discard;

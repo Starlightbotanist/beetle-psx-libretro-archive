@@ -63,14 +63,6 @@ void main()
 	float opacity = 1.0;
 #ifdef TEXTURED
 	vec4 NNColor;
-#ifdef UNSCALED
-	FragColor = FILTER_TYPE == FILTER_NEAREST ?
-		vec4(0.0, 0.0, 1.0, 1.0) : vec4(0.0, 1.0, 0.0, 1.0);
-#else
-	FragColor = FILTER_TYPE == FILTER_NEAREST ?
-		vec4(1.0, 0.0, 0.0, 1.0) : vec4(1.0, 1.0, 0.0, 1.0);
-#endif
-	return;
 
 	bool fastpath = (vParam.z & 0x100) != 0;
 	bool hd_enabled = !fastpath && (vParam.z & 0x200) == 0;
