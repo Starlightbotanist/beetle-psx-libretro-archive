@@ -108,6 +108,23 @@ static DMA_DiagTargetWrite
 static unsigned dma_diag_target_write_history_pos;
 static unsigned dma_diag_target_write_history_count;
 
+#define DMA_DIAG_SPU_BLOCK_HISTORY_SIZE 256
+typedef struct
+{
+   int32_t timestamp;
+   uint32_t base_address;
+   uint32_t block_control;
+   uint32_t channel_control;
+   uint32_t spu_rw_address;
+   uint32_t ram_value;
+   uint16_t word_count;
+} DMA_DiagSPUBlock;
+
+static DMA_DiagSPUBlock
+      dma_diag_spu_block_history[DMA_DIAG_SPU_BLOCK_HISTORY_SIZE];
+static unsigned dma_diag_spu_block_history_pos;
+static unsigned dma_diag_spu_block_history_count;
+
 extern retro_log_printf_t log_cb;
 
 void DMA_DiagArm(void)
@@ -140,6 +157,24 @@ static void DMA_DiagLog(const char *event, int32_t timestamp, int ch,
 void DMA_DiagDumpTargetWrites(void)
 {
    unsigned i;
+
+   log_cb(RETRO_LOG_INFO, "[SPUDMADIAG] blocks=%u\n",
+         dma_diag_spu_block_history_count);
+   for(i = 0; i < dma_diag_spu_block_history_count; i++)
+   {
+      unsigned slot = (dma_diag_spu_block_history_pos +
+            DMA_DIAG_SPU_BLOCK_HISTORY_SIZE -
+            dma_diag_spu_block_history_count + i) %
+            DMA_DIAG_SPU_BLOCK_HISTORY_SIZE;
+      const DMA_DiagSPUBlock *h = &dma_diag_spu_block_history[slot];
+
+      log_cb(RETRO_LOG_INFO,
+            "[SPUDMADIAG] seq=%u ts=%d dir=%s madr=%06x bcr=%08x "
+            "chcr=%08x words=%u spuaddr=%05x ram=%08x\n",
+            i, h->timestamp, h->channel_control & 1 ? "write" : "read",
+            h->base_address, h->block_control, h->channel_control,
+            h->word_count, h->spu_rw_address, h->ram_value);
+   }
 
    log_cb(RETRO_LOG_INFO, "[DMAWRITEDIAG] history=%u\n",
          dma_diag_target_write_history_count);
@@ -504,6 +539,27 @@ static INLINE void RunChannel(int32_t timestamp, int32_t clocks, int ch)
                      DMACH[ch].ClockCounter -= 7;
 
                   DMACH[ch].BlockControl = (DMACH[ch].BlockControl & 0xFFFF) | ((DMACH[ch].BlockControl - (1U << 16)) & 0xFFFF0000);
+               }
+
+               if(ch == CH_SPU)
+               {
+                  DMA_DiagSPUBlock *entry = &dma_diag_spu_block_history[
+                        dma_diag_spu_block_history_pos];
+
+                  entry->timestamp = timestamp;
+                  entry->base_address = DMACH[ch].BaseAddr;
+                  entry->block_control = DMACH[ch].BlockControl;
+                  entry->channel_control = DMACH[ch].ChanControl;
+                  entry->spu_rw_address = SPU_DiagGetRWAddr();
+                  entry->ram_value = MASMEM_ReadU32(MainRAM,
+                        DMACH[ch].BaseAddr & 0x1FFFFC);
+                  entry->word_count = DMACH[ch].WordCounter;
+                  dma_diag_spu_block_history_pos =
+                        (dma_diag_spu_block_history_pos + 1) %
+                        DMA_DIAG_SPU_BLOCK_HISTORY_SIZE;
+                  if(dma_diag_spu_block_history_count <
+                        DMA_DIAG_SPU_BLOCK_HISTORY_SIZE)
+                     dma_diag_spu_block_history_count++;
                }
             }
          }	/* End WordCounter reload. */
