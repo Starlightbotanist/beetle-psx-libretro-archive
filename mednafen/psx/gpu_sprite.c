@@ -404,13 +404,36 @@ DRAWSPRITE_T1_BMGROUP(1, 2, 1, 1)
 #define GPU_SPR_RHI_PUSH_HOOK(gpu, x, y, w, h, u, v, color, clut, T_LIT, TM_LIT, MO_LIT, BM_VAL, ME_LIT) \
    do { \
       enum blending_modes blend_mode = BLEND_MODE_AVERAGE; \
+      int32_t u0 = (u), v0 = (v); \
+      int32_t u_inc = 1, v_inc = 1; \
+      int32_t u1, v1, u_last, v_last; \
+      uint16_t min_u, min_v, max_u, max_v; \
       if (T_LIT) \
       { \
          if (TM_LIT) \
             blend_mode = BLEND_MODE_SUBTRACT; \
          else \
             blend_mode = BLEND_MODE_ADD; \
+         if ((gpu)->SpriteFlip & 0x1000) \
+         { \
+            u0 |= 1; \
+            u_inc = -1; \
+         } \
+         if ((gpu)->SpriteFlip & 0x2000) \
+            v_inc = -1; \
       } \
+      u1 = u0 + (w) * u_inc; \
+      v1 = v0 + (h) * v_inc; \
+      u_last = u0 + ((w) ? (w) - 1 : 0) * u_inc; \
+      v_last = v0 + ((h) ? (h) - 1 : 0) * v_inc; \
+      min_u = (uint16_t)((u0 < u_last) ? u0 : u_last); \
+      min_v = (uint16_t)((v0 < v_last) ? v0 : v_last); \
+      max_u = (uint16_t)((u0 > u_last) ? u0 : u_last); \
+      max_v = (uint16_t)((v0 > v_last) ? v0 : v_last); \
+      if (u0 < 0 || u0 > 255 || u_last < 0 || u_last > 255) \
+         min_u = 0, max_u = 256; \
+      if (v0 < 0 || v0 > 255 || v_last < 0 || v_last > 255) \
+         min_v = 0, max_v = 256; \
       if (rhi_intf_is_type() == RHI_OPENGL || rhi_intf_is_type() == RHI_VULKAN) \
       { \
          rhi_intf_push_quad(  (x),                    /* p0x */ \
@@ -432,13 +455,11 @@ DRAWSPRITE_T1_BMGROUP(1, 2, 1, 1)
                                * lives in gouraud polygons. */ \
                               NULL, \
                               NULL, /* no depth-cue sidecar either */ \
-                              (u),         (v), \
-                              (u) + (w),   (v), \
-                              (u),         (v) + (h), \
-                              (u) + (w),   (v) + (h), \
-                              (u), (v), \
-                              (u) + (w) - 1, /* clamp UVs 1 pixel from edge (sampling should not quite reach it) */ \
-                              (v) + (h) - 1, \
+                              (uint16_t)u0, (uint16_t)v0, \
+                              (uint16_t)u1, (uint16_t)v0, \
+                              (uint16_t)u0, (uint16_t)v1, \
+                              (uint16_t)u1, (uint16_t)v1, \
+                              min_u, min_v, max_u, max_v, \
                               (gpu)->TexPageX, \
                               (gpu)->TexPageY, \
                               (uint16_t)((clut) & (0x3f << 4)), \
