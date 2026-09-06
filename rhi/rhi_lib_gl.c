@@ -2688,8 +2688,8 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
 
          if (texture_dirty)
             gl_vram_sync_mirror_rect(renderer,
-                  texture_rect.x, texture_rect.y,
-                  texture_rect.width, texture_rect.height);
+                  producer_rect.x, producer_rect.y,
+                  producer_rect.width, producer_rect.height);
 
          /* A texture resolve may already have covered the palette row. */
          if (clut_dirty && gl_vram_sync_rect_is_dirty(renderer,
@@ -7826,7 +7826,7 @@ static void gl_mirror_fb_out_to_fb_texture(gl_renderer *renderer,
          ux, uy, ux + uw, uy + uh,
          (GLint) x, (GLint) y, (GLint)(x + w), (GLint)(y + h),
          GL_COLOR_BUFFER_BIT,
-         GL_NEAREST);
+         allow_with_software_fb ? GL_LINEAR : GL_NEAREST);
 
    /* Some drivers do not make dependency-driven framebuffer mirrors visible
     * to the following texture fetch without explicit completion. */
