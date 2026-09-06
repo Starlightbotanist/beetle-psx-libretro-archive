@@ -2643,7 +2643,7 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
    int x1;
    int y1;
    unsigned i;
-   uint8_t framebuffer_feedback = 0;
+   bool framebuffer_feedback = false;
 
 #ifdef GL_READ_FRAMEBUFFER
    if (v[0].texture_blend_mode != 0 &&
@@ -2677,12 +2677,7 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
                v[0].clut[0], v[0].clut[1], clut_width, 1);
       }
 
-      if (texture_gpu_written || clut_gpu_written)
-         framebuffer_feedback |= 1;
-      if (texture_dirty)
-         framebuffer_feedback |= 2;
-      if (clut_dirty)
-         framebuffer_feedback |= 4;
+      framebuffer_feedback = texture_gpu_written || clut_gpu_written;
 
       if (texture_dirty || clut_dirty)
       {

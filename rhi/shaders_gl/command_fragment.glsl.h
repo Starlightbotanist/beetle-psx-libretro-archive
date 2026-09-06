@@ -1028,19 +1028,6 @@ void main() {
       return;
    }
 
-   if (frag_framebuffer_feedback != 0u) {
-      uint dependency = frag_framebuffer_feedback & 6u;
-      if (dependency == 6u)
-         frag_color = vec4(1., 1., 1., 1.);
-      else if (dependency == 4u)
-         frag_color = vec4(0., 1., 1., 1.);
-      else if (dependency == 2u)
-         frag_color = vec4(1., 0., 1., 1.);
-      else
-         frag_color = vec4(1., 1., 0., 1.);
-      return;
-   }
-
    vec4 color;
    bool modulation_quantized = false;
    float opacity=1.;
@@ -1130,6 +1117,14 @@ STRINGIZE(
             // We're not drawing those texels in this pass, discard
             discard;
          }
+
+         if (frag_depth_shift == 0u)
+            frag_color = vec4(1., 0., 0., 1.);
+         else if (frag_depth_shift == 1u)
+            frag_color = vec4(0., 1., 0., 1.);
+         else
+            frag_color = vec4(0., 0., 1., 1.);
+         return;
 
          // The mask bit written to VRAM is bit 15 of the texture color,
          // OR'd with GP0(E6h) bit 0. Matches primitive.frag's
