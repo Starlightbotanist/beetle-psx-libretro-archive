@@ -11,6 +11,7 @@ uint32_t DMA_Read(const int32_t timestamp, uint32_t A);
 
 void DMA_ResetTS(void);
 void DMA_DiagArm(void);
+void DMA_DiagDumpTargetWrites(void);
 
 void DMA_Power(void);
 

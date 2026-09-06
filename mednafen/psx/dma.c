@@ -83,6 +83,26 @@ static int32_t lastts;
 static bool dma_diag_armed;
 static unsigned dma_diag_events;
 
+#define DMA_DIAG_TARGET_WRITE_HISTORY_SIZE 64
+typedef struct
+{
+   int32_t timestamp;
+   uint32_t address;
+   uint32_t value;
+   uint32_t old_value;
+   uint32_t base_address;
+   uint32_t block_control;
+   uint32_t channel_control;
+   uint32_t current_address;
+   uint16_t word_counter;
+   uint8_t channel;
+} DMA_DiagTargetWrite;
+
+static DMA_DiagTargetWrite
+      dma_diag_target_write_history[DMA_DIAG_TARGET_WRITE_HISTORY_SIZE];
+static unsigned dma_diag_target_write_history_pos;
+static unsigned dma_diag_target_write_history_count;
+
 extern retro_log_printf_t log_cb;
 
 void DMA_DiagArm(void)
@@ -110,6 +130,29 @@ static void DMA_DiagLog(const char *event, int32_t timestamp, int ch,
          ch >= 0 && ch < 7 ? DMACH[ch].WordCounter : 0,
          ch >= 0 && ch < 7 ? DMACH[ch].ClockCounter : 0,
          DMAIntControl, DMAIntStatus, IRQOut);
+}
+
+void DMA_DiagDumpTargetWrites(void)
+{
+   unsigned i;
+
+   log_cb(RETRO_LOG_INFO, "[DMAWRITEDIAG] history=%u\n",
+         dma_diag_target_write_history_count);
+   for(i = 0; i < dma_diag_target_write_history_count; i++)
+   {
+      unsigned slot = (dma_diag_target_write_history_pos +
+            DMA_DIAG_TARGET_WRITE_HISTORY_SIZE -
+            dma_diag_target_write_history_count + i) %
+            DMA_DIAG_TARGET_WRITE_HISTORY_SIZE;
+      const DMA_DiagTargetWrite *h = &dma_diag_target_write_history[slot];
+
+      log_cb(RETRO_LOG_INFO,
+            "[DMAWRITEDIAG] seq=%u ts=%d ch=%u address=%08x old=%08x "
+            "value=%08x madr=%06x bcr=%08x chcr=%08x cur=%06x words=%u\n",
+            i, h->timestamp, h->channel, h->address, h->old_value,
+            h->value, h->base_address, h->block_control,
+            h->channel_control, h->current_address, h->word_counter);
+   }
 }
 
 static INLINE void RecalcIRQOut(void)
@@ -484,6 +527,30 @@ static INLINE void RunChannel(int32_t timestamp, int32_t clocks, int ch)
             if(!(CRModeCache & 0x1))
             {
                uint32_t waddr = (DMACH[ch].CurAddr + (voffs << 2)) & 0x1FFFFC;
+
+               if(MDFN_UNLIKELY(waddr >= 0x000E6544 && waddr < 0x000E6558))
+               {
+                  DMA_DiagTargetWrite *entry =
+                        &dma_diag_target_write_history[
+                        dma_diag_target_write_history_pos];
+
+                  entry->timestamp = timestamp;
+                  entry->channel = ch;
+                  entry->address = waddr;
+                  entry->old_value = MASMEM_ReadU32(MainRAM, waddr);
+                  entry->value = vtmp;
+                  entry->base_address = DMACH[ch].BaseAddr;
+                  entry->block_control = DMACH[ch].BlockControl;
+                  entry->channel_control = DMACH[ch].ChanControl;
+                  entry->current_address = DMACH[ch].CurAddr;
+                  entry->word_counter = DMACH[ch].WordCounter;
+                  dma_diag_target_write_history_pos =
+                        (dma_diag_target_write_history_pos + 1) %
+                        DMA_DIAG_TARGET_WRITE_HISTORY_SIZE;
+                  if(dma_diag_target_write_history_count <
+                        DMA_DIAG_TARGET_WRITE_HISTORY_SIZE)
+                     dma_diag_target_write_history_count++;
+               }
                MASMEM_WriteU32(MainRAM, waddr, vtmp);
 #ifdef HAVE_LIGHTREC
                if(!inv_count)

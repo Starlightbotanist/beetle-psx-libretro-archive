@@ -30,6 +30,7 @@
 
 #include "psx.h"
 #include "cpu.h"
+#include "dma.h"
 #include "psx_mem.h"
 
 #include "../state_helpers.h"
@@ -258,6 +259,7 @@ static void CPU_DiagTrace(uint32_t pc, uint32_t instr,
                i, h->pc, h->instr, h->address, h->width,
                h->old_value, h->value);
       }
+      DMA_DiagDumpTargetWrites();
    }
 
    {
