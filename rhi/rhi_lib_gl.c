@@ -4582,6 +4582,7 @@ static gl_display_rect compute_gl_display_rect(gl_renderer *renderer)
 
 static void bind_libretro_framebuffer(gl_renderer *renderer)
 {
+   static unsigned crop_diag_frame;
    GLuint fbo;
    uint32_t w, h;
    uint32_t upscale;
@@ -4632,6 +4633,20 @@ static void bind_libretro_framebuffer(gl_renderer *renderer)
    h       = (uint32_t) _h * upscale;
    vp_w   *= upscale;
    vp_h   *= upscale;
+
+   if (renderer->crop_overscan == 2 && crop_diag_frame < 600 && log_cb)
+      log_cb(RETRO_LOG_INFO,
+            "[GL crop] frame=%u mode=%u pal=%u 480i=%u vrange=%u,%u "
+            "scanlines=%d,%d fb=%u,%u display=%d,%d,%u,%u "
+            "frontend=%u,%u viewport=%d,%d,%u,%u\n",
+            crop_diag_frame++, (unsigned)renderer->curr_width_mode,
+            renderer->config.is_pal, renderer->config.is_480i,
+            renderer->config.display_area_vrange[0],
+            renderer->config.display_area_vrange[1],
+            renderer->initial_scanline, renderer->last_scanline,
+            renderer->config.display_resolution[0],
+            renderer->config.display_resolution[1],
+            _x, _y, _w, _h, f_w, f_h, x, y, vp_w, vp_h);
 
    if (w != f_w || h != f_h)
    {
