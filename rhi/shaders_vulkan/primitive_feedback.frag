@@ -42,6 +42,16 @@ layout(location = 6) in mediump vec4 vFog;
 void main()
 {
 #ifdef TEXTURED
+#if defined(UNSCALED)
+	if (gl_FragCoord.x >= 256.0)
+#else
+	if (gl_FragCoord.x >= 256.0 * float(SCALE))
+#endif
+	{
+		FragColor = vec4(1.0, 0.0, 1.0, 1.0);
+		return;
+	}
+
 	if (vUV.x < 0.0 || vUV.x >= 256.0)
 	{
 		FragColor = vec4(1.0, 0.0, 1.0, 1.0);

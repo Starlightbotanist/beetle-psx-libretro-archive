@@ -594,6 +594,17 @@ void rhi_intf_set_draw_offset(int16_t x, int16_t y)
 void rhi_intf_set_draw_area(uint16_t x0, uint16_t y0,
                             uint16_t x1, uint16_t y1)
 {
+   static unsigned issue890_draw_area_count;
+
+   if (issue890_draw_area_count < 4096)
+   {
+      log_cb(RETRO_LOG_INFO,
+            "[ISSUE890][DRAW_AREA] (%u,%u)-(%u,%u) rhi=%u\n",
+            (unsigned)x0, (unsigned)y0, (unsigned)x1, (unsigned)y1,
+            (unsigned)rhi_type);
+      issue890_draw_area_count++;
+   }
+
 #ifdef RHI_DUMP
    rhi_dump_set_draw_area(x0, y0, x1, y1);
 #endif
