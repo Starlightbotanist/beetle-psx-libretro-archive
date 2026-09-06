@@ -62,6 +62,16 @@ void main()
 {
 	float opacity = 1.0;
 #ifdef TEXTURED
+	#if defined(UNSCALED)
+	int issue890_y = int(gl_FragCoord.y);
+	#else
+	int issue890_y = int(gl_FragCoord.y) / SCALE;
+	#endif
+	if (issue890_y == 256 && all(equal(vBaseUV, ivec2(0, 0))) &&
+		all(equal(vParam.xy, ivec2(0, 256))) && (vParam.z & 3) == 1 &&
+		all(equal(vTexLimits, ivec4(0, 0, 255, 254))))
+		discard;
+
 	vec4 NNColor;
 
 	bool fastpath = (vParam.z & 0x100) != 0;
