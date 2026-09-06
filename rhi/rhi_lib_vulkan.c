@@ -4493,6 +4493,10 @@ static void commandbuffer_copy_buffer_whole(struct CommandBuffer *self,
          const Image *dst,
          const Image *src,
          const VkImageCopy *region);
+   static void commandbuffer_resolve_image(struct CommandBuffer *self,
+         const Image *dst,
+         const Image *src,
+         const VkImageResolve *region);
    static void commandbuffer_full_barrier(struct CommandBuffer *self);
    static void commandbuffer_pixel_barrier(struct CommandBuffer *self);
    static void commandbuffer_barrier_simple(struct CommandBuffer *self,
@@ -6762,11 +6766,14 @@ static void renderer_init(Renderer *self,
        * lower self->scaling factor to compensate. */
    }
 
-   info.levels = 1;
-   info.samples = (VkSampleCountFlagBits)(self->msaa);
-   info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-   ih_move(&self->scaled_read_snapshot, device_create_image(self->device, &info, NULL));
-   image_set_layout(ih_get(&self->scaled_read_snapshot), Layout_General);
+   if (self->msaa == 1)
+   {
+      info.levels = 1;
+      info.samples = VK_SAMPLE_COUNT_1_BIT;
+      info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+      ih_move(&self->scaled_read_snapshot, device_create_image(self->device, &info, NULL));
+      image_set_layout(ih_get(&self->scaled_read_snapshot), Layout_General);
+   }
 
    fbatlas_set_hazard_listener(&self->atlas, self);
    {
@@ -6881,7 +6888,7 @@ static void renderer_init_primitive_pipelines(Renderer *self)
 
    if (self->msaa > 1)
    {
-      self->pipelines.textured_scaled = device_request_program_graphics_code(self->device, textured_vert, sizeof(textured_vert), textured_msaa_frag, sizeof(textured_msaa_frag));
+      self->pipelines.textured_scaled = device_request_program_graphics_code(self->device, textured_vert, sizeof(textured_vert), textured_frag, sizeof(textured_frag));
       self->pipelines.textured_unscaled = device_request_program_graphics_code(self->device, textured_vert, sizeof(textured_vert), textured_msaa_unscaled_frag, sizeof(textured_msaa_unscaled_frag));
    }
    else
@@ -6905,7 +6912,7 @@ static void renderer_init_primitive_feedback_pipelines(Renderer *self)
    if (self->msaa > 1)
    {
       self->pipelines.textured_masked_scaled = device_request_program_graphics_code(self->device, textured_vert, sizeof(textured_vert),
-            feedback_msaa_frag, sizeof(feedback_msaa_frag));
+            feedback_frag, sizeof(feedback_frag));
       self->pipelines.textured_masked_unscaled = device_request_program_graphics_code(self->device, textured_vert, sizeof(textured_vert),
             feedback_msaa_unscaled_frag, sizeof(feedback_msaa_unscaled_frag));
       self->pipelines.flat_masked = device_request_program_graphics_code(self->device, flat_vert, sizeof(flat_vert),
@@ -9563,6 +9570,9 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
       Image *scaled = self->msaa > 1 ?
          ih_get(&self->scaled_framebuffer_msaa) :
          ih_get(&self->scaled_framebuffer);
+      Image *read = self->msaa > 1 ?
+         ih_get(&self->scaled_framebuffer) :
+         ih_get(&self->scaled_read_snapshot);
 
       renderer_flush_blits(self);
       renderer_flush_resolves(self);
@@ -9572,29 +9582,45 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
       commandbuffer_image_barrier(cbh_get(&self->cmd),
-            ih_get(&self->scaled_read_snapshot),
+            read,
             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
       for (i = 0; i < Rect2DVec_size(&self->queue.scaled_texture_reads); i++)
       {
          const VkRect2D *rect = Rect2DVec_at(&self->queue.scaled_texture_reads, i);
-         VkImageCopy copy = {
-            { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-            { rect->offset.x * (int32_t)self->scaling,
-              rect->offset.y * (int32_t)self->scaling, 0 },
-            { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
-            { rect->offset.x * (int32_t)self->scaling,
-              rect->offset.y * (int32_t)self->scaling, 0 },
-            { rect->extent.width * self->scaling,
-              rect->extent.height * self->scaling, 1 }
+         VkOffset3D offset = {
+            rect->offset.x * (int32_t)self->scaling,
+            rect->offset.y * (int32_t)self->scaling, 0
          };
-         commandbuffer_copy_image(cbh_get(&self->cmd),
-               ih_get(&self->scaled_read_snapshot),
-               scaled, &copy);
+         VkExtent3D extent = {
+            rect->extent.width * self->scaling,
+            rect->extent.height * self->scaling, 1
+         };
+
+         if (self->msaa > 1)
+         {
+            VkImageResolve resolve = {
+               { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, offset,
+               { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, offset,
+               extent
+            };
+            commandbuffer_resolve_image(cbh_get(&self->cmd),
+                  read, scaled, &resolve);
+         }
+         else
+         {
+            VkImageCopy copy = {
+               { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, offset,
+               { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, offset,
+               extent
+            };
+            commandbuffer_copy_image(cbh_get(&self->cmd),
+                  read, scaled, &copy);
+         }
       }
       commandbuffer_image_barrier(cbh_get(&self->cmd),
-            ih_get(&self->scaled_read_snapshot),
+            read,
             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
@@ -9698,7 +9724,9 @@ static void renderer_dispatch_set_scaled_read_texture(Renderer *self,
       bool textured)
 {
    if (scaled_read)
-      commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->scaled_read_snapshot)), StockSampler_NearestClamp);
+      commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0,
+            self->msaa > 1 ? iv_get(imageview_vec_at(&self->scaled_views, 0)) :
+            image_get_view(ih_get(&self->scaled_read_snapshot)), StockSampler_NearestClamp);
    else
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer)), StockSampler_NearestClamp);
    if (textured)
@@ -10582,12 +10610,9 @@ static void renderer_reset_queue(Renderer *self)
 static void renderer_semi_transparent_set_state(Renderer *self,
       const SemiTransparentState *state){
    if (state->scaled_read)
-   {
-      if (self->msaa > 1)
-         commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->scaled_framebuffer_msaa)), StockSampler_NearestClamp);
-      else
-         commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, iv_get(imageview_vec_at(&self->scaled_views, 0)), StockSampler_NearestClamp);
-   }
+      commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0,
+            self->msaa > 1 ? iv_get(imageview_vec_at(&self->scaled_views, 0)) :
+            image_get_view(ih_get(&self->scaled_read_snapshot)), StockSampler_NearestClamp);
    else
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer)), StockSampler_NearestClamp);
    renderer_hd_texture_uniforms(self, state->hd_texture_index);
@@ -13916,6 +13941,15 @@ static VkOffset3D cb_add_offset(const VkOffset3D *a, const VkOffset3D *b)
          const Image *dst, const Image *src, const VkImageCopy *region)
    {
       vkCmdCopyImage(self->cmd,
+            image_get_image(src), image_get_layout(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL),
+            image_get_image(dst), image_get_layout(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL),
+            1, region);
+   }
+
+   static void commandbuffer_resolve_image(struct CommandBuffer *self,
+         const Image *dst, const Image *src, const VkImageResolve *region)
+   {
+      vkCmdResolveImage(self->cmd,
             image_get_image(src), image_get_layout(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL),
             image_get_image(dst), image_get_layout(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL),
             1, region);

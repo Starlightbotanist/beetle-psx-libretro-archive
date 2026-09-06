@@ -18,6 +18,8 @@
 
 static const char * command_fragment_name_ = GLSL_FRAGMENT(
 uniform sampler2D fb_texture;
+uniform sampler2D fb_feedback_texture;
+uniform uint feedback_upscaling;
 
 // Scaling to apply to the dither pattern
 uniform uint dither_scaling;
@@ -117,6 +119,10 @@ const uint FILTER_MODE_SABR         = 1U;
 vec4 vram_get_pixel(uint x, uint y) {
   x = (x & 0x3ffU);
   y = (y & 0x1ffU);
+
+  if (frag_framebuffer_feedback != 0U && feedback_upscaling > 1U)
+     return texelFetch(fb_feedback_texture,
+           ivec2(x, y) * int(feedback_upscaling), 0);
 
   return texelFetch(fb_texture, ivec2(x, y), 0);
 }
@@ -1042,7 +1048,8 @@ void main() {
       {
          vec4 texel;
          bool hd_on = hd_enabled != 0U;
-         vec4 texel0 = sample_texel(frag_texture_coord + vec2(0.5));
+         vec4 texel0 = sample_texel(vec2(frag_texture_coord.x,
+                  frag_texture_coord.y));
 				  
 		 opacity = float(!is_transparent(texel0));
 
@@ -1116,9 +1123,6 @@ STRINGIZE(
             // We're not drawing those texels in this pass, discard
             discard;
          }
-
-         frag_color = vec4(texel.rgb, 1.);
-         return;
 
          // The mask bit written to VRAM is bit 15 of the texture color,
          // OR'd with GP0(E6h) bit 0. Matches primitive.frag's
