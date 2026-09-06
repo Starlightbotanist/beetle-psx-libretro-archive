@@ -856,6 +856,39 @@ void rhi_intf_push_quad(
    bool is_sprite,
    bool may_be_2d)
 {
+	static unsigned issue890_count;
+	uint16_t diag_min_u = t0x;
+	uint16_t diag_max_u = t0x;
+	uint16_t diag_min_v = t0y;
+	uint16_t diag_max_v = t0y;
+	const uint16_t diag_u[3] = { t1x, t2x, t3x };
+	const uint16_t diag_v[3] = { t1y, t2y, t3y };
+	unsigned i;
+
+	for (i = 0; i < 3; i++)
+	{
+		if (diag_u[i] < diag_min_u) diag_min_u = diag_u[i];
+		if (diag_u[i] > diag_max_u) diag_max_u = diag_u[i];
+		if (diag_v[i] < diag_min_v) diag_min_v = diag_v[i];
+		if (diag_v[i] > diag_max_v) diag_max_v = diag_v[i];
+	}
+	if (issue890_count < 8192 &&
+		(diag_max_u > 255 || diag_max_v > 255 ||
+		 diag_max_u - diag_min_u > 128 || diag_max_v - diag_min_v > 128))
+	{
+		log_cb(RETRO_LOG_INFO, "[ISSUE890][QUAD] p=(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f) "
+			"uv=(%u,%u)(%u,%u)(%u,%u)(%u,%u) lim=(%u,%u)-(%u,%u) "
+			"page=(%u,%u) clut=(%u,%u) shift=%u sprite=%u 2d=%u\n",
+			p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y,
+			(unsigned)t0x, (unsigned)t0y, (unsigned)t1x, (unsigned)t1y,
+			(unsigned)t2x, (unsigned)t2y, (unsigned)t3x, (unsigned)t3y,
+			(unsigned)min_u, (unsigned)min_v, (unsigned)max_u, (unsigned)max_v,
+			(unsigned)texpage_x, (unsigned)texpage_y,
+			(unsigned)clut_x, (unsigned)clut_y, (unsigned)depth_shift,
+			(unsigned)is_sprite, (unsigned)may_be_2d);
+		issue890_count++;
+	}
+
 #ifdef RHI_DUMP
    const rhi_dump_vertex vertices[4] = {
       { p0x, p0y, p0w, c0, t0x, t0y },
