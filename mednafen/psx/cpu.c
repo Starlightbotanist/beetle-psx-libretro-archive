@@ -108,11 +108,72 @@ PS_CPU                  *PSX_CPU = &s_cpu;
 static unsigned          cpu_diag_exceptions;
 static bool              cpu_diag_armed;
 
+#define CPU_DIAG_HISTORY_SIZE 2048
+typedef struct
+{
+   uint32_t pc;
+   uint32_t instr;
+   uint32_t gpr[32];
+} CPU_DiagHistory;
+
+static CPU_DiagHistory cpu_diag_history[CPU_DIAG_HISTORY_SIZE];
+static unsigned cpu_diag_history_pos;
+static unsigned cpu_diag_history_count;
+static bool cpu_diag_exit_dumped;
+
 void CPU_DiagArm(void)
 {
    cpu_diag_exceptions = 0;
+   cpu_diag_history_pos = 0;
+   cpu_diag_history_count = 0;
+   cpu_diag_exit_dumped = false;
    cpu_diag_armed = true;
    log_cb(RETRO_LOG_INFO, "[CPUDIAG] armed\n");
+}
+
+static void CPU_DiagTrace(uint32_t pc, uint32_t instr,
+      const uint32_t *gpr)
+{
+   CPU_DiagHistory *entry;
+   unsigned i;
+
+   if(!cpu_diag_armed || cpu_diag_exit_dumped)
+      return;
+
+   entry = &cpu_diag_history[cpu_diag_history_pos];
+   entry->pc = pc;
+   entry->instr = instr;
+   memcpy(entry->gpr, gpr, sizeof(entry->gpr));
+   cpu_diag_history_pos = (cpu_diag_history_pos + 1) % CPU_DIAG_HISTORY_SIZE;
+   if(cpu_diag_history_count < CPU_DIAG_HISTORY_SIZE)
+      cpu_diag_history_count++;
+
+   if((pc & 0x1FFFFFFF) != 0xA0 || gpr[9] != 0x3A)
+      return;
+
+   cpu_diag_exit_dumped = true;
+   log_cb(RETRO_LOG_INFO, "[EXITDIAG] history=%u\n",
+         cpu_diag_history_count);
+   for(i = 0; i < cpu_diag_history_count; i++)
+   {
+      unsigned slot = (cpu_diag_history_pos + CPU_DIAG_HISTORY_SIZE -
+            cpu_diag_history_count + i) % CPU_DIAG_HISTORY_SIZE;
+      const CPU_DiagHistory *h = &cpu_diag_history[slot];
+
+      log_cb(RETRO_LOG_INFO,
+            "[EXITDIAG] seq=%u pc=%08x instr=%08x "
+            "v0=%08x v1=%08x a0=%08x a1=%08x a2=%08x a3=%08x "
+            "t0=%08x t1=%08x t2=%08x t3=%08x t4=%08x t5=%08x "
+            "t6=%08x t7=%08x s0=%08x s1=%08x s2=%08x s3=%08x "
+            "s4=%08x s5=%08x s6=%08x s7=%08x t8=%08x t9=%08x "
+            "gp=%08x sp=%08x fp=%08x ra=%08x\n",
+            i, h->pc, h->instr, h->gpr[2], h->gpr[3], h->gpr[4],
+            h->gpr[5], h->gpr[6], h->gpr[7], h->gpr[8], h->gpr[9],
+            h->gpr[10], h->gpr[11], h->gpr[12], h->gpr[13], h->gpr[14],
+            h->gpr[15], h->gpr[16], h->gpr[17], h->gpr[18], h->gpr[19],
+            h->gpr[20], h->gpr[21], h->gpr[22], h->gpr[23], h->gpr[24],
+            h->gpr[25], h->gpr[28], h->gpr[29], h->gpr[30], h->gpr[31]);
+   }
 }
 
 /* Interpreter dispatch replication (computed-goto builds only): each
@@ -952,6 +1013,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
    }
 
    instr = ReadInstruction(&timestamp, PC);
+   CPU_DiagTrace(PC, instr, GPR);
 
 
    // 
@@ -1000,6 +1062,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 	 goto OpDone; \
 	} \
 	instr = ReadInstruction(&timestamp, PC); \
+	CPU_DiagTrace(PC, instr, GPR); \
 	opf = instr & 0x3F; \
 	if(instr & (0x3F << 26)) \
 	 opf = 0x40 | (instr >> 26); \
