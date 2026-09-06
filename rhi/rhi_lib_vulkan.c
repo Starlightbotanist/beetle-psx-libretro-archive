@@ -9059,6 +9059,7 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    }
    offset_uv = self->scaled_uv_offset && self->render_state.primitive_type == PrimitiveType_Polygon;
 
+   scaled_read = false;
    z = renderer_allocate_depth(self, scaled_read ? Domain_Scaled : Domain_Unscaled, &rect);
    vram_prov_op(self, (int)rect.x, (int)rect.y,
          (int)rect.width, (int)rect.height, 1);
