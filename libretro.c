@@ -693,6 +693,7 @@ static void extract_directory(char *buf, const char *path, size_t size)
 #include "mednafen/psx/timer.h"
 #include "mednafen/psx/sio.h"
 #include "mednafen/psx/cdc.h"
+#include "mednafen/psx/irq.h"
 #include "mednafen/psx/spu.h"
 #include "mednafen/mempatcher.h"
 
@@ -6299,6 +6300,7 @@ static bool retro_set_system_av_info(void)
 
 void retro_run(void)
 {
+   static unsigned long long cd_diag_frame;
    bool updated = false;
    static int32_t rects[MEDNAFEN_CORE_GEOMETRY_MAX_H];
    EmulateSpecStruct spec = {0};
@@ -6570,6 +6572,30 @@ void retro_run(void)
    timestamp = CPU_Run(PSX_CPU, timestamp);
 
    assert(timestamp);
+
+   cd_diag_frame++;
+   if(!(cd_diag_frame % 30))
+   {
+#ifdef HAVE_LIGHTREC
+      int diag_backend = psx_dynarec;
+#else
+      int diag_backend = 0;
+#endif
+      log_cb(RETRO_LOG_INFO,
+            "[CDDIAG] frame=%llu backend=%d ts=%d pc=%08x next=%d "
+            "irq=%08x/%08x drive=%d mode=%02x cur=%d seek=%d psrc=%d "
+            "cmd=%02x/%d/%d cdcirq=%02x results=%u pipe=%u/%u "
+            "audio=%u/%u/%u\n",
+            cd_diag_frame, diag_backend, timestamp, PSX_CPU->BACKED_PC,
+            CPU_GetEventNT(), IRQ_Read(0), IRQ_Read(4),
+            PSX_CDC->DriveStatus, PSX_CDC->Mode, PSX_CDC->CurSector,
+            PSX_CDC->SeekTarget, PSX_CDC->PSRCounter,
+            PSX_CDC->PendingCommand, PSX_CDC->PendingCommandPhase,
+            PSX_CDC->PendingCommandCounter, PSX_CDC->IRQBuffer,
+            PSX_CDC->ResultsIn, PSX_CDC->SectorPipe_Pos,
+            PSX_CDC->SectorPipe_In, PSX_CDC->AudioBuffer.ReadPos,
+            PSX_CDC->AudioBuffer.Size, PSX_CDC->AudioBuffer.Freq);
+   }
 
    ForceEventUpdates(timestamp);
 

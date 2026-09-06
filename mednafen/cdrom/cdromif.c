@@ -405,6 +405,10 @@ bool CDIF_ReadRawSector(CDIF *cdif, uint8_t *buf, uint32_t lba,
 
    if (lba >= cdif->disc_toc.tracks[100].lba)
    {
+      log_cb(RETRO_LOG_INFO,
+            "[CDDIAG] raw_reject lba=%u leadout=%u mt=%d timeout=%lld\n",
+            lba, cdif->disc_toc.tracks[100].lba, cdif->is_mt,
+            (long long)timeout_us);
       /* Read past the lead-out (e.g. CD-DA playback running off the end
        * of the last track as it loops). Zero the buffer before
        * returning failure: callers - notably the CDC's CD-DA play path -
@@ -484,6 +488,10 @@ bool CDIF_ReadRawSectorPWOnly(CDIF *cdif, uint8_t *buf, uint32_t lba,
 
    if (lba >= cdif->disc_toc.tracks[100].lba)
    {
+      log_cb(RETRO_LOG_INFO,
+            "[CDDIAG] pw_reject lba=%u leadout=%u mt=%d hint=%d\n",
+            lba, cdif->disc_toc.tracks[100].lba, cdif->is_mt,
+            hint_fullread);
       memset(buf, 0, 96);
       return false;
    }
@@ -742,4 +750,3 @@ CDIF *CDIF_Open(bool *success, const char *path,
    }
    return cdif;
 }
-

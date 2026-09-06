@@ -245,7 +245,7 @@ static void     PS_CDC_XA_ProcessSector(PS_CDC *cdc, const uint8_t *sdata,
 static void     PS_CDC_ClearAudioBuffers(PS_CDC *cdc);
 static void     PS_CDC_ApplyVolume(PS_CDC *cdc, int32_t samples[2]);
 static void     PS_CDC_ReadAudioBuffer(PS_CDC *cdc, int32_t samples[2]);
-static void     PS_CDC_HandlePlayRead(PS_CDC *cdc);
+static void     PS_CDC_HandlePlayRead(PS_CDC *cdc, int32_t timestamp);
 static void     PS_CDC_PreSeekHack(PS_CDC *cdc, uint32_t target);
 static void     PS_CDC_ReadBase(PS_CDC *cdc);
 /* Command_* dispatch functions, called via the Commands[] table. */
@@ -353,6 +353,38 @@ extern unsigned cd_2x_speedup;
 extern bool cd_async;
 extern bool cd_warned_slow;
 extern int64_t cd_slow_timeout;
+extern retro_log_printf_t log_cb;
+
+static unsigned long long cdc_diag_seq;
+static unsigned long long cdc_diag_reg_reads;
+static int32_t cdc_diag_event_ts;
+
+static void PS_CDC_DiagState(PS_CDC *cdc, const char *event,
+      int32_t timestamp)
+{
+   log_cb(RETRO_LOG_INFO,
+         "[CDDIAG] seq=%llu event=%s ts=%d drive=%d after=%d mode=%02x "
+         "cur=%d seek=%d seek_done=%d retry=%d hold=%d psrc=%d "
+         "cmd=%02x phase=%d cmdc=%d ready=%d irq=%02x irqmask=%02x "
+         "aip=%02x results=%u pipe=%u/%u sectors=%u "
+         "audio=%u/%u/%u subqok=%d subq=%02x%02x%02x-%02x%02x%02x-"
+         "%02x%02x%02x%02x\n",
+         cdc_diag_seq++, event, timestamp, cdc->DriveStatus,
+         cdc->StatusAfterSeek, cdc->Mode, cdc->CurSector,
+         cdc->SeekTarget, cdc->SeekFinished, cdc->SeekRetryCounter,
+         cdc->HoldLogicalPos, cdc->PSRCounter, cdc->PendingCommand,
+         cdc->PendingCommandPhase, cdc->PendingCommandCounter,
+         cdc->CDCReadyReceiveCounter, cdc->IRQBuffer,
+         cdc->IRQOutTestMask, cdc->AsyncIRQPending, cdc->ResultsIn,
+         cdc->SectorPipe_Pos, cdc->SectorPipe_In, cdc->SectorsRead,
+         cdc->AudioBuffer.ReadPos, cdc->AudioBuffer.Size,
+         cdc->AudioBuffer.Freq, cdc->SubQChecksumOK,
+         cdc->SubQBuf_Safe[0], cdc->SubQBuf_Safe[1],
+         cdc->SubQBuf_Safe[2], cdc->SubQBuf_Safe[3],
+         cdc->SubQBuf_Safe[4], cdc->SubQBuf_Safe[5],
+         cdc->SubQBuf_Safe[7], cdc->SubQBuf_Safe[8],
+         cdc->SubQBuf_Safe[9], cdc->ReportLastF);
+}
 
 void PS_CDC_Destroy(PS_CDC *cdc)
 {
@@ -380,6 +412,8 @@ void PS_CDC_DMForceStop(PS_CDC *cdc)
 
 void PS_CDC_SetDisc(PS_CDC *cdc, bool tray_open, CDIF *cdif, const char *disc_id)
 {
+   int track;
+
    if(tray_open)
       cdif = NULL;
 
@@ -398,6 +432,20 @@ void PS_CDC_SetDisc(PS_CDC *cdc, bool tray_open, CDIF *cdif, const char *disc_id
       cdc->DiscChanged = true;
 
       CDIF_ReadTOC(cdc->Cur_CDIF, &cdc->toc);
+
+      cdc_diag_seq = 0;
+      cdc_diag_reg_reads = 0;
+      cdc_diag_event_ts = 0;
+      log_cb(RETRO_LOG_INFO,
+            "[CDDIAG] disc first=%u last=%u leadout=%u async=%d id=%.4s\n",
+            cdc->toc.first_track, cdc->toc.last_track,
+            cdc->toc.tracks[100].lba, cd_async, disc_id ? disc_id : "----");
+      for(track = cdc->toc.first_track; track <= cdc->toc.last_track; track++)
+         log_cb(RETRO_LOG_INFO,
+               "[CDDIAG] toc track=%d lba=%u control=%02x adr=%02x\n",
+               track, cdc->toc.tracks[track].lba,
+               cdc->toc.tracks[track].control,
+               cdc->toc.tracks[track].adr);
 
       if(disc_id)
       {
@@ -736,6 +784,7 @@ void PS_CDC_WriteIRQ(PS_CDC *cdc, uint8_t V)
 
    cdc->IRQBuffer = (cdc->IRQBuffer & 0x10) | V;
    PS_CDC_RecalcIRQ(cdc);
+   PS_CDC_DiagState(cdc, "irq", cdc_diag_event_ts);
 }
 
 void PS_CDC_BeginResults(PS_CDC *cdc)
@@ -1266,9 +1315,10 @@ void PS_CDC_EnbufferizeCDDASector(PS_CDC *cdc, const uint8_t *buf)
    }
 
    ab->ReadPos = 0;
+   PS_CDC_DiagState(cdc, "audio_fill", cdc_diag_event_ts);
 }
 
-void PS_CDC_HandlePlayRead(PS_CDC *cdc)
+void PS_CDC_HandlePlayRead(PS_CDC *cdc, int32_t timestamp)
 {
    /* Target slot for the new sector: SectorPipe_Pos is the write
     * position, which is also the position of the OLDEST entry when
@@ -1280,9 +1330,12 @@ void PS_CDC_HandlePlayRead(PS_CDC *cdc)
    const bool was_full  = (cdc->SectorPipe_In >= CDC_SECTOR_PIPE_COUNT);
    unsigned speed_mul;
 
+   cdc_diag_event_ts = timestamp;
+   PS_CDC_DiagState(cdc, "read_begin", timestamp);
 
    if(cdc->CurSector >= ((int32_t)cdc->toc.tracks[100].lba + 300) && cdc->CurSector >= (75 * 60 * 75 - 150))
    {
+      PS_CDC_DiagState(cdc, "far_stop", timestamp);
       cdc->SeekFinished = -1;
       cdc->DriveStatus = DS_STOPPED;
       cdc->SectorPipe_Pos = cdc->SectorPipe_In = 0;
@@ -1478,6 +1531,7 @@ void PS_CDC_HandlePlayRead(PS_CDC *cdc)
    }
 
    PS_CDC_DecodeSubQ(cdc, target + 2352);
+   PS_CDC_DiagState(cdc, "read_decoded", timestamp);
 
    /* Video CD tap.  On a real SCPH-5903 the MPEG daughterboard is not on the
     * CPU bus at all: it sits on the CD DSP's serial audio bus and sees every
@@ -1489,6 +1543,7 @@ void PS_CDC_HandlePlayRead(PS_CDC *cdc)
 
    if(cdc->SubQBuf_Safe[1] == 0xAA && (cdc->DriveStatus == DS_PLAYING || (cdc->DriveStatus == DS_READING && !(cdc->SubQBuf_Safe[0] & 0x40) && (cdc->Mode & MODE_CDDA))))
    {
+      PS_CDC_DiagState(cdc, "leadout", timestamp);
       cdc->HeaderBufValid = false;
 
 
@@ -1577,6 +1632,7 @@ void PS_CDC_HandlePlayRead(PS_CDC *cdc)
          tr[6] = abs_lev_max >> 0;
          tr[7] = abs_lev_max >> 8;
 
+         PS_CDC_DiagState(cdc, "report", timestamp);
          PS_CDC_SetAIP_Buf(cdc, CDCIRQ_DATA_READY, 8, tr);
       }
 
@@ -1779,7 +1835,8 @@ int32_t PS_CDC_Update(PS_CDC *cdc, const int32_t timestamp)
                cdc->DriveStatus == DS_READING || cdc->DriveStatus == DS_PLAYING ||
                cdc->DriveStatus == DS_SEEKING_LOGICAL2)
             {
-               PS_CDC_HandlePlayRead(cdc);
+               PS_CDC_HandlePlayRead(cdc,
+                     timestamp - clocks + chunk_clocks);
             }
          }
       }
@@ -1807,7 +1864,11 @@ int32_t PS_CDC_Update(PS_CDC *cdc, const int32_t timestamp)
 
                command = &Commands[cdc->PendingCommand];
 
+               PS_CDC_DiagState(cdc, "cmd_phase2",
+                     timestamp - clocks + chunk_clocks);
                next_time = command->func2(cdc);
+               PS_CDC_DiagState(cdc, "cmd_phase2_done",
+                     timestamp - clocks + chunk_clocks);
             }
             else switch (cdc->PendingCommandPhase)
             {
@@ -1862,7 +1923,19 @@ int32_t PS_CDC_Update(PS_CDC *cdc, const int32_t timestamp)
                      else
                      {
                         const CDC_CTEntry *command = &Commands[cdc->PendingCommand];
+                        log_cb(RETRO_LOG_INFO,
+                              "[CDDIAG] cmd_args cmd=%02x count=%u "
+                              "data=%02x%02x%02x%02x\n",
+                              cdc->PendingCommand, cdc->ArgsReceiveIn,
+                              cdc->ArgsReceiveIn > 0 ? cdc->ArgsReceiveBuf[0] : 0,
+                              cdc->ArgsReceiveIn > 1 ? cdc->ArgsReceiveBuf[1] : 0,
+                              cdc->ArgsReceiveIn > 2 ? cdc->ArgsReceiveBuf[2] : 0,
+                              cdc->ArgsReceiveIn > 3 ? cdc->ArgsReceiveBuf[3] : 0);
+                        PS_CDC_DiagState(cdc, "cmd_exec",
+                              timestamp - clocks + chunk_clocks);
                         next_time = command->func(cdc, cdc->ArgsReceiveIn, cdc->ArgsReceiveBuf);
+                        PS_CDC_DiagState(cdc, "cmd_done",
+                              timestamp - clocks + chunk_clocks);
                         cdc->PendingCommandPhase = 2;
                      }
                      cdc->ArgsReceiveIn = 0;
@@ -1913,6 +1986,7 @@ void PS_CDC_Write(PS_CDC *cdc, const int32_t timestamp, uint32_t A, uint8_t V)
             cdc->PendingCommand = V;
             cdc->PendingCommandPhase = -1;
             cdc->ArgsReceiveIn = 0;
+            PS_CDC_DiagState(cdc, "cmd_write", timestamp);
             break;
 
          case 0x01:
@@ -2013,6 +2087,10 @@ void PS_CDC_Write(PS_CDC *cdc, const int32_t timestamp, uint32_t A, uint8_t V)
 uint8_t PS_CDC_Read(PS_CDC *cdc, const int32_t timestamp, uint32_t A)
 {
    A &= 0x03;
+
+   cdc_diag_reg_reads++;
+   if(cdc_diag_reg_reads <= 128 || !(cdc_diag_reg_reads & 0x3FF))
+      PS_CDC_DiagState(cdc, "reg_read", timestamp);
 
    /*printf("Read %08x\n", A); */
 

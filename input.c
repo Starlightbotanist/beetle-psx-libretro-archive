@@ -776,6 +776,8 @@ static void input_handle_lightgun( INPUT_DATA *p_input, int iplayer, retro_input
 
 void input_update(bool libretro_supports_bitmasks, retro_input_state_t input_state_cb )
 {
+   static bool diag_down;
+   static unsigned long long diag_input_seq;
    unsigned i;
    unsigned iplayer;
    /* For each player (logical controller) */
@@ -918,6 +920,23 @@ void input_update(bool libretro_supports_bitmasks, retro_input_state_t input_sta
             }
 
             break;
+      }
+
+      if(iplayer == 0 &&
+            (input_type[iplayer] == RETRO_DEVICE_JOYPAD ||
+             input_type[iplayer] == RETRO_DEVICE_PS_CONTROLLER ||
+             input_type[iplayer] == RETRO_DEVICE_PS_DUALSHOCK ||
+             input_type[iplayer] == RETRO_DEVICE_PS_ANALOG ||
+             input_type[iplayer] == RETRO_DEVICE_PS_ANALOG_JOYSTICK))
+      {
+         bool down = (p_input->buttons & (1U << 6)) != 0;
+         if(down != diag_down)
+         {
+            log_cb(RETRO_LOG_INFO,
+                  "[CDDIAG] input seq=%llu down=%d buttons=%04x\n",
+                  diag_input_seq++, down, p_input->buttons);
+            diag_down = down;
+         }
       }
 
 
