@@ -1069,6 +1069,9 @@ struct gl_renderer {
       retro_time_t cpu_begin;
       uint64_t cpu_total_us;
       uint64_t gpu_total_us;
+      uint64_t draw_total_us;
+      uint64_t sync_total_us;
+      uint64_t finalize_total_us;
       uint64_t queries_frame[GL_FRAME_DIAG_QUERY_COUNT];
       GLuint queries[GL_FRAME_DIAG_QUERY_COUNT];
       bool pending[GL_FRAME_DIAG_QUERY_COUNT];
@@ -1081,6 +1084,9 @@ struct gl_renderer {
       unsigned disjoint_count;
       unsigned cpu_max_us;
       unsigned gpu_max_us;
+      unsigned draws;
+      unsigned batches;
+      unsigned vertices;
    } frame_diag;
 };
 typedef struct gl_renderer gl_renderer;
@@ -2671,6 +2677,7 @@ static void gl_vram_sync_mirror_rect(gl_renderer *renderer,
 static void gl_vram_sync_primitive(gl_renderer *renderer,
       gl_command_vertex *v, unsigned vertices)
 {
+   retro_time_t begin = cpu_features_get_time_usec();
    float min_x;
    float min_y;
    float max_x;
@@ -2783,6 +2790,9 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
    if (x1 > x0 && y1 > y0)
       gl_vram_sync_mark_rect(renderer, (unsigned)x0, (unsigned)y0,
             (unsigned)(x1 - x0), (unsigned)(y1 - y0));
+
+   renderer->frame_diag.sync_total_us +=
+         cpu_features_get_time_usec() - begin;
 }
 
 /* Per-primitive HD query (Vulkan renderer_get_hd_texture_index
@@ -2856,12 +2866,18 @@ static gl_draw_buffer *gl_draw_buffer_build(const char *vertex_shader_src,
 static void gl_renderer_draw(gl_renderer *renderer)
 {
    gl_framebuffer _fb;
+   retro_time_t begin;
    int16_t x;
    int16_t y;
    size_t bi;
 
    if (!renderer || static_renderer.state == GL_STATE_INVALID)
       return;
+
+   begin = cpu_features_get_time_usec();
+   renderer->frame_diag.draws++;
+   renderer->frame_diag.batches += renderer->batches.count;
+   renderer->frame_diag.vertices += renderer->vertex_index_pos;
 
    if (!renderer->command_buffer->map)
    {
@@ -3102,6 +3118,9 @@ static void gl_renderer_draw(gl_renderer *renderer)
    renderer->force_mask = false;
 
    glDeleteFramebuffers(1, &_fb.id);
+
+   renderer->frame_diag.draw_total_us +=
+         cpu_features_get_time_usec() - begin;
 }
 
 static void gl_renderer_upload_textures(
@@ -6175,13 +6194,31 @@ static void gl_frame_diag_finalize(gl_renderer *renderer)
                   renderer->frame_diag.gpu_count : 0),
             renderer->frame_diag.gpu_max_us,
             renderer->frame_diag.disjoint_count);
+      log_cb(RETRO_LOG_INFO,
+            "[GL frame phases] draw_avg_us=%llu sync_avg_us=%llu "
+            "finalize_avg_us=%llu draws=%u batches=%u vertices=%u\n",
+            (unsigned long long)(renderer->frame_diag.draw_total_us /
+                  renderer->frame_diag.cpu_count),
+            (unsigned long long)(renderer->frame_diag.sync_total_us /
+                  renderer->frame_diag.cpu_count),
+            (unsigned long long)(renderer->frame_diag.finalize_total_us /
+                  renderer->frame_diag.cpu_count),
+            renderer->frame_diag.draws,
+            renderer->frame_diag.batches,
+            renderer->frame_diag.vertices);
       renderer->frame_diag.cpu_total_us = 0;
       renderer->frame_diag.gpu_total_us = 0;
+      renderer->frame_diag.draw_total_us = 0;
+      renderer->frame_diag.sync_total_us = 0;
+      renderer->frame_diag.finalize_total_us = 0;
       renderer->frame_diag.cpu_count = 0;
       renderer->frame_diag.gpu_count = 0;
       renderer->frame_diag.disjoint_count = 0;
       renderer->frame_diag.cpu_max_us = 0;
       renderer->frame_diag.gpu_max_us = 0;
+      renderer->frame_diag.draws = 0;
+      renderer->frame_diag.batches = 0;
+      renderer->frame_diag.vertices = 0;
    }
 }
 
@@ -6279,6 +6316,7 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
                            unsigned height, unsigned pitch)
 {
    gl_renderer      *renderer;
+   retro_time_t      finalize_begin;
    struct gl_analog *analog          = NULL;
    unsigned          analog_native_w = 0;
    unsigned          analog_native_h = 0;
@@ -6296,6 +6334,8 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
    renderer = static_renderer.state_data;
    if (!renderer)
       return;
+
+   finalize_begin = cpu_features_get_time_usec();
 
    tt_frame_advance();
 
@@ -6555,6 +6595,9 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
    renderer->vram_sync_diag.max_native_pixels = 0;
 
    cleanup_gl_state();
+
+   renderer->frame_diag.finalize_total_us +=
+         cpu_features_get_time_usec() - finalize_begin;
 
    gl_frame_diag_finalize(renderer);
 
