@@ -2923,6 +2923,15 @@ bool GPU_DMACanWrite(void)
    return CalcFIFOReadyBit();
 }
 
+void GPU_GetDMADiagnosticState(GPUDMADiagnosticState *state)
+{
+   state->fifo_count = GPU_BlitterFIFO.in_count;
+   state->in_cmd = GPU.InCmd;
+   state->head_command = state->fifo_count ? FastFIFO_Peek(&GPU_BlitterFIFO) >> 24 : 0xFF;
+   state->required_words = state->fifo_count ? Commands[state->head_command].fifo_fb_len : 0;
+   state->draw_time_avail = GPU.DrawTimeAvail;
+}
+
 uint16_t *GPU_get_vram(void)
 {
    return GPU.vram;

@@ -276,6 +276,17 @@ extern "C" {
 void     GPU_WriteDMA(uint32_t V, uint32_t addr);
 uint32_t GPU_ReadDMA(void);
 bool     GPU_DMACanWrite(void);
+
+typedef struct
+{
+   uint32_t fifo_count;
+   uint32_t in_cmd;
+   uint32_t head_command;
+   uint32_t required_words;
+   int32_t draw_time_avail;
+} GPUDMADiagnosticState;
+
+void GPU_GetDMADiagnosticState(GPUDMADiagnosticState *state);
 int32_t  GPU_Update(const int32_t sys_timestamp);
 int32_t  GPU_GetScanlineNum(void);
 

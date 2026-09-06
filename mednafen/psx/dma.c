@@ -34,6 +34,13 @@
 #include "gpu.h"
 #include "dma.h"
 
+#define BEETLE_GPU_DMA_DIAGNOSTICS 1
+
+#if BEETLE_GPU_DMA_DIAGNOSTICS
+extern retro_log_printf_t log_cb;
+#define GPU_DMA_DIAG_MAX_WORDS (2 * 1024 * 1024 / sizeof(uint32_t))
+#endif
+
 /* Notes:
 
  Channel 4(SPU):
@@ -81,6 +88,147 @@ typedef struct
 static Channel DMACH[7];
 static int32_t lastts;
 
+#if BEETLE_GPU_DMA_DIAGNOSTICS
+typedef struct
+{
+   bool active;
+   bool initial_slice;
+   bool snapshot_valid;
+   uint32_t sequence;
+   uint32_t start_addr;
+   uint32_t chcr;
+   uint32_t bcr;
+   uint64_t declared_words;
+   uint64_t words_consumed;
+   uint64_t source_mismatches;
+   uint64_t start_hash;
+   uint64_t observed_hash;
+   uint32_t can_write_checks;
+   uint32_t blocked_checks;
+   uint32_t slices;
+   int32_t start_timestamp;
+   uint32_t first_mismatch_index;
+   uint32_t first_mismatch_addr;
+   uint32_t first_mismatch_start;
+   uint32_t first_mismatch_current;
+} GPUDMADiagnostic;
+
+static GPUDMADiagnostic gpu_dma_diag;
+static uint32_t gpu_dma_sequence;
+static uint32_t gpu_dma_snapshot[GPU_DMA_DIAG_MAX_WORDS];
+
+static INLINE uint64_t GPU_DMA_DiagHash(uint64_t hash, uint32_t value)
+{
+   hash ^= value;
+   hash *= UINT64_C(1099511628211);
+   return hash;
+}
+
+static void GPU_DMA_DiagStart(const int32_t timestamp)
+{
+   uint64_t words_per_block = DMACH[CH_GPU].BlockControl & 0xFFFF;
+   uint64_t blocks = DMACH[CH_GPU].BlockControl >> 16;
+   uint64_t i;
+   uint32_t addr = DMACH[CH_GPU].BaseAddr;
+   int32_t step = (DMACH[CH_GPU].ChanControl & 0x2) ? -4 : 4;
+   GPUDMADiagnosticState gpu;
+
+   if(!words_per_block)
+      words_per_block = 0x10000;
+   if(!blocks)
+      blocks = 0x10000;
+
+   memset(&gpu_dma_diag, 0, sizeof(gpu_dma_diag));
+   gpu_dma_diag.active = true;
+   gpu_dma_diag.initial_slice = true;
+   gpu_dma_diag.snapshot_valid = words_per_block * blocks <= GPU_DMA_DIAG_MAX_WORDS;
+   gpu_dma_diag.sequence = ++gpu_dma_sequence;
+   gpu_dma_diag.start_addr = addr;
+   gpu_dma_diag.chcr = DMACH[CH_GPU].ChanControl;
+   gpu_dma_diag.bcr = DMACH[CH_GPU].BlockControl;
+   gpu_dma_diag.declared_words = words_per_block * blocks;
+   gpu_dma_diag.start_timestamp = timestamp;
+   gpu_dma_diag.start_hash = UINT64_C(1469598103934665603);
+   gpu_dma_diag.observed_hash = UINT64_C(1469598103934665603);
+
+   if(gpu_dma_diag.snapshot_valid)
+   {
+      for(i = 0; i < gpu_dma_diag.declared_words; i++)
+      {
+         uint32_t value = MASMEM_ReadU32(MainRAM, addr & 0x1FFFFC);
+         gpu_dma_snapshot[i] = value;
+         gpu_dma_diag.start_hash = GPU_DMA_DiagHash(gpu_dma_diag.start_hash, value);
+         addr = (addr + step) & 0xFFFFFF;
+      }
+   }
+
+   GPU_GetDMADiagnosticState(&gpu);
+   if(log_cb)
+      log_cb(RETRO_LOG_INFO,
+            "[DMA2 start] seq=%u ts=%d madr=%06x chcr=%08x bcr=%08x bs=%llu ba=%llu words=%llu snapshot=%u hash=%016llx fifo=%u incmd=%u head=%02x need=%u draw=%d event=%d\n",
+            gpu_dma_diag.sequence, timestamp, gpu_dma_diag.start_addr,
+            gpu_dma_diag.chcr, gpu_dma_diag.bcr,
+            (unsigned long long)words_per_block, (unsigned long long)blocks,
+            (unsigned long long)gpu_dma_diag.declared_words,
+            gpu_dma_diag.snapshot_valid, (unsigned long long)gpu_dma_diag.start_hash,
+            gpu.fifo_count, gpu.in_cmd, gpu.head_command, gpu.required_words,
+            gpu.draw_time_avail, EventCycles);
+}
+
+static void GPU_DMA_DiagSlice(const int32_t timestamp, const int32_t clocks,
+      uint64_t before_words, uint32_t before_addr, uint16_t before_counter,
+      uint32_t before_bcr, int32_t before_clock, uint32_t before_blocked)
+{
+   GPUDMADiagnosticState gpu;
+   bool complete = !(DMACH[CH_GPU].ChanControl & (1U << 24));
+   uint64_t consumed = gpu_dma_diag.words_consumed - before_words;
+
+   gpu_dma_diag.slices++;
+   GPU_GetDMADiagnosticState(&gpu);
+
+   if(log_cb && (gpu_dma_diag.initial_slice || consumed ||
+      gpu_dma_diag.blocked_checks != before_blocked || complete))
+      log_cb(RETRO_LOG_INFO,
+            "[DMA2 slice] seq=%u slice=%u initial=%u ts=%d dt=%d budget=%d consumed=%llu total=%llu addr=%06x->%06x wc=%u->%u bcr=%08x->%08x clock=%d->%d checks=%u blocked=%u fifo=%u incmd=%u head=%02x need=%u draw=%d active=%u mismatches=%llu\n",
+            gpu_dma_diag.sequence, gpu_dma_diag.slices,
+            gpu_dma_diag.initial_slice, timestamp,
+            timestamp - gpu_dma_diag.start_timestamp, clocks,
+            (unsigned long long)consumed,
+            (unsigned long long)gpu_dma_diag.words_consumed,
+            before_addr, DMACH[CH_GPU].CurAddr,
+            before_counter, DMACH[CH_GPU].WordCounter,
+            before_bcr, DMACH[CH_GPU].BlockControl,
+            before_clock, DMACH[CH_GPU].ClockCounter,
+            gpu_dma_diag.can_write_checks,
+            gpu_dma_diag.blocked_checks,
+            gpu.fifo_count, gpu.in_cmd, gpu.head_command, gpu.required_words,
+            gpu.draw_time_avail, !complete,
+            (unsigned long long)gpu_dma_diag.source_mismatches);
+
+   gpu_dma_diag.initial_slice = false;
+
+   if(complete)
+   {
+      if(log_cb)
+         log_cb(RETRO_LOG_INFO,
+               "[DMA2 done] seq=%u start_ts=%d end_ts=%d elapsed=%d words=%llu declared=%llu slices=%u blocked=%u mismatches=%llu first_index=%u first_addr=%06x first_start=%08x first_current=%08x start_hash=%016llx observed_hash=%016llx\n",
+               gpu_dma_diag.sequence, gpu_dma_diag.start_timestamp, timestamp,
+               timestamp - gpu_dma_diag.start_timestamp,
+               (unsigned long long)gpu_dma_diag.words_consumed,
+               (unsigned long long)gpu_dma_diag.declared_words,
+               gpu_dma_diag.slices, gpu_dma_diag.blocked_checks,
+               (unsigned long long)gpu_dma_diag.source_mismatches,
+               gpu_dma_diag.first_mismatch_index,
+               gpu_dma_diag.first_mismatch_addr,
+               gpu_dma_diag.first_mismatch_start,
+               gpu_dma_diag.first_mismatch_current,
+               (unsigned long long)gpu_dma_diag.start_hash,
+               (unsigned long long)gpu_dma_diag.observed_hash);
+      gpu_dma_diag.active = false;
+   }
+}
+#endif
+
 static INLINE void RecalcIRQOut(void)
 {
    bool irqo = (bool)DMAIntStatus;
@@ -108,6 +256,9 @@ void DMA_Power(void)
    DMAControl = 0;
    DMAIntControl = 0;
    DMAIntStatus = 0;
+#if BEETLE_GPU_DMA_DIAGNOSTICS
+   memset(&gpu_dma_diag, 0, sizeof(gpu_dma_diag));
+#endif
    RecalcIRQOut();
 }
 
@@ -285,6 +436,14 @@ static INLINE void ChRW(const unsigned ch, const uint32_t CRModeCache, const uin
 
 static INLINE void RunChannel(int32_t timestamp, int32_t clocks, int ch)
 {
+#if BEETLE_GPU_DMA_DIAGNOSTICS
+   uint64_t diag_before_words = gpu_dma_diag.words_consumed;
+   uint32_t diag_before_addr = DMACH[ch].CurAddr;
+   uint16_t diag_before_counter = DMACH[ch].WordCounter;
+   uint32_t diag_before_bcr = DMACH[ch].BlockControl;
+   int32_t diag_before_clock = DMACH[ch].ClockCounter;
+   uint32_t diag_before_blocked = gpu_dma_diag.blocked_checks;
+#endif
 #ifdef HAVE_LIGHTREC
    uint32_t inv_min = 0, inv_max = 0, inv_count = 0;
 #endif
@@ -353,7 +512,21 @@ static INLINE void RunChannel(int32_t timestamp, int32_t clocks, int ch)
                break;
 
             if(!ChCan(ch, CRModeCache))
+            {
+#if BEETLE_GPU_DMA_DIAGNOSTICS
+               if(ch == CH_GPU && gpu_dma_diag.active)
+               {
+                  gpu_dma_diag.can_write_checks++;
+                  gpu_dma_diag.blocked_checks++;
+               }
+#endif
                break;
+            }
+
+#if BEETLE_GPU_DMA_DIAGNOSTICS
+            if(ch == CH_GPU && gpu_dma_diag.active)
+               gpu_dma_diag.can_write_checks++;
+#endif
 
             DMACH[ch].CurAddr = DMACH[ch].BaseAddr;
 
@@ -442,6 +615,29 @@ static INLINE void RunChannel(int32_t timestamp, int32_t clocks, int ch)
 
             if(CRModeCache & 0x1)
                vtmp = MASMEM_ReadU32(MainRAM, DMACH[ch].CurAddr & 0x1FFFFC);
+
+#if BEETLE_GPU_DMA_DIAGNOSTICS
+            if(ch == CH_GPU && gpu_dma_diag.active && (CRModeCache & 0x1))
+            {
+               uint64_t index = gpu_dma_diag.words_consumed;
+
+               if(gpu_dma_diag.snapshot_valid && index < gpu_dma_diag.declared_words &&
+                  vtmp != gpu_dma_snapshot[index])
+               {
+                  if(!gpu_dma_diag.source_mismatches)
+                  {
+                     gpu_dma_diag.first_mismatch_index = (uint32_t)index;
+                     gpu_dma_diag.first_mismatch_addr = DMACH[ch].CurAddr & 0x1FFFFC;
+                     gpu_dma_diag.first_mismatch_start = gpu_dma_snapshot[index];
+                     gpu_dma_diag.first_mismatch_current = vtmp;
+                  }
+                  gpu_dma_diag.source_mismatches++;
+               }
+
+               gpu_dma_diag.observed_hash = GPU_DMA_DiagHash(gpu_dma_diag.observed_hash, vtmp);
+               gpu_dma_diag.words_consumed++;
+            }
+#endif
 
 			/*iCB: Pass address of memory for GPU */
             ChRW(ch, CRModeCache, DMACH[ch].CurAddr, &vtmp, &voffs);
@@ -539,6 +735,13 @@ SkipPayloadStuff: ;
     * range. */
    if(inv_count)
       CPU_LightrecClear(inv_min, ((inv_max - inv_min) >> 2) + 1);
+#endif
+
+#if BEETLE_GPU_DMA_DIAGNOSTICS
+   if(ch == CH_GPU && gpu_dma_diag.active)
+      GPU_DMA_DiagSlice(timestamp, clocks, diag_before_words,
+            diag_before_addr, diag_before_counter, diag_before_bcr,
+            diag_before_clock, diag_before_blocked);
 #endif
 }
 
@@ -662,6 +865,10 @@ void DMA_Write(const int32_t timestamp, uint32_t A, uint32_t V)
                 *
                 * Also, it's needed for RecalcHalt() to work with some semblance of workiness.
                 * */
+#if BEETLE_GPU_DMA_DIAGNOSTICS
+               if(ch == CH_GPU && (DMACH[ch].ChanControl & 0x701) == 0x201)
+                  GPU_DMA_DiagStart(timestamp);
+#endif
                RunChannel(timestamp, EventCycles/2, ch);
             }
 
