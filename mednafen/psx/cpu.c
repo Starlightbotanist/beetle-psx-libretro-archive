@@ -120,6 +120,10 @@ static CPU_DiagHistory cpu_diag_history[CPU_DIAG_HISTORY_SIZE];
 static unsigned cpu_diag_history_pos;
 static unsigned cpu_diag_history_count;
 static bool cpu_diag_exit_dumped;
+static unsigned cpu_diag_bios_events;
+static uint32_t cpu_diag_prev_pc;
+static uint32_t cpu_diag_prev_instr;
+static bool cpu_diag_prev_valid;
 
 void CPU_DiagArm(void)
 {
@@ -127,6 +131,8 @@ void CPU_DiagArm(void)
    cpu_diag_history_pos = 0;
    cpu_diag_history_count = 0;
    cpu_diag_exit_dumped = false;
+   cpu_diag_bios_events = 0;
+   cpu_diag_prev_valid = false;
    cpu_diag_armed = true;
    log_cb(RETRO_LOG_INFO, "[CPUDIAG] armed\n");
 }
@@ -135,10 +141,42 @@ static void CPU_DiagTrace(uint32_t pc, uint32_t instr,
       const uint32_t *gpr)
 {
    CPU_DiagHistory *entry;
+   uint32_t phys_pc;
    unsigned i;
 
    if(!cpu_diag_armed || cpu_diag_exit_dumped)
       return;
+
+   phys_pc = pc & 0x1FFFFFFF;
+   if(cpu_diag_bios_events < 512)
+   {
+      bool in_rom = phys_pc >= 0x1FC00000;
+      bool prev_in_rom = cpu_diag_prev_valid &&
+            (cpu_diag_prev_pc & 0x1FFFFFFF) >= 0x1FC00000;
+
+      if(cpu_diag_prev_valid && in_rom != prev_in_rom)
+      {
+         log_cb(RETRO_LOG_INFO,
+               "[BIOSDIAG] seq=%u event=%s prev=%08x prev_instr=%08x "
+               "pc=%08x instr=%08x t1=%08x a0=%08x a1=%08x a2=%08x "
+               "a3=%08x sp=%08x ra=%08x\n",
+               cpu_diag_bios_events++, in_rom ? "rom_enter" : "rom_leave",
+               cpu_diag_prev_pc, cpu_diag_prev_instr, pc, instr, gpr[9],
+               gpr[4], gpr[5], gpr[6], gpr[7], gpr[29], gpr[31]);
+      }
+      else if(phys_pc == 0xA0 || phys_pc == 0xB0 || phys_pc == 0xC0)
+      {
+         log_cb(RETRO_LOG_INFO,
+               "[BIOSDIAG] seq=%u event=call vector=%02x function=%02x "
+               "a0=%08x a1=%08x a2=%08x a3=%08x sp=%08x ra=%08x\n",
+               cpu_diag_bios_events++, phys_pc, gpr[9], gpr[4], gpr[5],
+               gpr[6], gpr[7], gpr[29], gpr[31]);
+      }
+   }
+
+   cpu_diag_prev_pc = pc;
+   cpu_diag_prev_instr = instr;
+   cpu_diag_prev_valid = true;
 
    entry = &cpu_diag_history[cpu_diag_history_pos];
    entry->pc = pc;
