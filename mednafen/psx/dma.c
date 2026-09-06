@@ -94,7 +94,10 @@ typedef struct
    uint32_t block_control;
    uint32_t channel_control;
    uint32_t current_address;
+   uint32_t spu_rw_address;
    uint16_t word_counter;
+   uint16_t spu_control;
+   uint16_t spu_status;
    uint8_t channel;
 } DMA_DiagTargetWrite;
 
@@ -148,10 +151,12 @@ void DMA_DiagDumpTargetWrites(void)
 
       log_cb(RETRO_LOG_INFO,
             "[DMAWRITEDIAG] seq=%u ts=%d ch=%u address=%08x old=%08x "
-            "value=%08x madr=%06x bcr=%08x chcr=%08x cur=%06x words=%u\n",
+            "value=%08x madr=%06x bcr=%08x chcr=%08x cur=%06x words=%u "
+            "spucnt=%04x spustat=%04x spuaddr=%05x\n",
             i, h->timestamp, h->channel, h->address, h->old_value,
             h->value, h->base_address, h->block_control,
-            h->channel_control, h->current_address, h->word_counter);
+            h->channel_control, h->current_address, h->word_counter,
+            h->spu_control, h->spu_status, h->spu_rw_address);
    }
 }
 
@@ -544,6 +549,9 @@ static INLINE void RunChannel(int32_t timestamp, int32_t clocks, int ch)
                   entry->channel_control = DMACH[ch].ChanControl;
                   entry->current_address = DMACH[ch].CurAddr;
                   entry->word_counter = DMACH[ch].WordCounter;
+                  entry->spu_control = SPU_DiagGetControl();
+                  entry->spu_status = SPU_DiagGetStatus();
+                  entry->spu_rw_address = SPU_DiagGetRWAddr();
                   dma_diag_target_write_history_pos =
                         (dma_diag_target_write_history_pos + 1) %
                         DMA_DIAG_TARGET_WRITE_HISTORY_SIZE;

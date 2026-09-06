@@ -1640,6 +1640,21 @@ static INLINE void SPU_RunNoise(void)
    return(ret);
 }
 
+uint16_t SPU_DiagGetControl(void)
+{
+   return SPUControl;
+}
+
+uint16_t SPU_DiagGetStatus(void)
+{
+   return regs.s.global.s.SPUStatus;
+}
+
+uint32_t SPU_DiagGetRWAddr(void)
+{
+   return RWAddr;
+}
+
 /*
  * External API for the SPU module. The public functions
  * (SPU_Power / SPU_Write / SPU_Read / etc.) are defined directly
