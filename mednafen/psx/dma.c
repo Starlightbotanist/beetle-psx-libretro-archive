@@ -139,7 +139,9 @@ typedef struct
    uint32_t block_control;
    uint32_t channel_control;
    uint32_t current_address;
+   uint32_t transfer_id;
    uint16_t word_counter;
+   bool was_active;
 } DMA_DiagSPURegister;
 
 static DMA_DiagSPURegister
@@ -149,6 +151,7 @@ static unsigned dma_diag_spu_register_history_count;
 static uint32_t dma_diag_spu_transfer_id;
 static uint32_t dma_diag_spu_transfer_base;
 static uint32_t dma_diag_spu_transfer_block_control;
+static bool dma_diag_target_hit;
 
 extern retro_log_printf_t log_cb;
 
@@ -213,9 +216,10 @@ void DMA_DiagDumpTargetWrites(void)
       const DMA_DiagSPURegister *h = &dma_diag_spu_register_history[slot];
 
       log_cb(RETRO_LOG_INFO,
-            "[SPUREGDIAG] seq=%u ts=%d address=%08x value=%08x "
-            "madr=%06x bcr=%08x chcr=%08x cur=%06x words=%u\n",
-            i, h->timestamp, h->address, h->value, h->base_address,
+            "[SPUREGDIAG] seq=%u id=%u active=%u ts=%d address=%08x "
+            "value=%08x madr=%06x bcr=%08x chcr=%08x cur=%06x words=%u\n",
+            i, h->transfer_id, h->was_active, h->timestamp,
+            h->address, h->value, h->base_address,
             h->block_control, h->channel_control, h->current_address,
             h->word_counter);
    }
@@ -274,6 +278,7 @@ void DMA_Power(void)
    dma_diag_spu_transfer_id = 0;
    dma_diag_spu_transfer_base = 0;
    dma_diag_spu_transfer_block_control = 0;
+   dma_diag_target_hit = false;
 
    memset(DMACH, 0, sizeof(DMACH));
 
@@ -598,7 +603,7 @@ static INLINE void RunChannel(int32_t timestamp, int32_t clocks, int ch)
                   DMACH[ch].BlockControl = (DMACH[ch].BlockControl & 0xFFFF) | ((DMACH[ch].BlockControl - (1U << 16)) & 0xFFFF0000);
                }
 
-               if(ch == CH_SPU)
+               if(ch == CH_SPU && !dma_diag_target_hit)
                {
                   DMA_DiagSPUBlock *entry = &dma_diag_spu_block_history[
                         dma_diag_spu_block_history_pos];
@@ -683,6 +688,7 @@ static INLINE void RunChannel(int32_t timestamp, int32_t clocks, int ch)
                   if(dma_diag_target_write_history_count <
                         DMA_DIAG_TARGET_WRITE_HISTORY_SIZE)
                      dma_diag_target_write_history_count++;
+                  dma_diag_target_hit = true;
                }
                MASMEM_WriteU32(MainRAM, waddr, vtmp);
 #ifdef HAVE_LIGHTREC
@@ -817,12 +823,15 @@ int32_t DMA_Update(const int32_t timestamp)
 void DMA_Write(const int32_t timestamp, uint32_t A, uint32_t V)
 {
    bool will_set_event = false;
+   bool spu_was_active;
    int ch = (A & 0x7F) >> 4;
 
    /* FIXME if we ever have "accurate" bus emulation */
    V <<= (A & 3) * 8;
 
    DMA_Update(timestamp);
+   spu_was_active = ch == CH_SPU &&
+         (DMACH[ch].ChanControl & (1U << 24));
 
    if(ch == CH_CDC || ch == 7)
       DMA_DiagLog("write_before", timestamp, ch, A, V);
@@ -923,7 +932,7 @@ void DMA_Write(const int32_t timestamp, uint32_t A, uint32_t V)
    if (will_set_event)
       PSX_SetEventNT(PSX_EVENT_DMA, timestamp + CalcNextEvent(0x10000000));
 
-   if(ch == CH_SPU)
+   if(ch == CH_SPU && !dma_diag_target_hit)
    {
       DMA_DiagSPURegister *entry = &dma_diag_spu_register_history[
             dma_diag_spu_register_history_pos];
@@ -935,7 +944,9 @@ void DMA_Write(const int32_t timestamp, uint32_t A, uint32_t V)
       entry->block_control = DMACH[ch].BlockControl;
       entry->channel_control = DMACH[ch].ChanControl;
       entry->current_address = DMACH[ch].CurAddr;
+      entry->transfer_id = dma_diag_spu_transfer_id;
       entry->word_counter = DMACH[ch].WordCounter;
+      entry->was_active = spu_was_active;
       dma_diag_spu_register_history_pos =
             (dma_diag_spu_register_history_pos + 1) %
             DMA_DIAG_SPU_REGISTER_HISTORY_SIZE;
