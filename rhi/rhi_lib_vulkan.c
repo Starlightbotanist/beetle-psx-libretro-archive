@@ -9072,6 +9072,48 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    vram_prov_op(self, (int)rect.x, (int)rect.y,
          (int)rect.width, (int)rect.height, 1);
 
+   if (log_cb && self->render_state.texture_mode != TextureMode_None &&
+       rect.x + rect.width > 256)
+   {
+      static unsigned issue890_draw;
+      if (issue890_draw < 16384)
+      {
+         unsigned i;
+         log_cb(RETRO_LOG_INFO,
+               "[ISSUE890][VKDRAW] n=%u z=%.0f count=%u dst=(%u,%u %ux%u) type=%d tex=%d page=(%u,%u) clut=(%u,%u) lim=(%u,%u)-(%u,%u) win=(%u,%u,%u,%u) src=(%u,%u %ux%u) semi=%d mask=%d set=%d mod=%d dither=%d filter=%d scaled=%d\n",
+               issue890_draw, z, count, rect.x, rect.y, rect.width, rect.height,
+               (int)self->render_state.primitive_type,
+               (int)self->render_state.texture_mode,
+               self->render_state.texture_offset_x,
+               self->render_state.texture_offset_y,
+               self->render_state.palette_offset_x,
+               self->render_state.palette_offset_y,
+               self->render_state.UVLimits.min_u,
+               self->render_state.UVLimits.min_v,
+               self->render_state.UVLimits.max_u,
+               self->render_state.UVLimits.max_v,
+               self->render_state.texture_window.mask_x,
+               self->render_state.texture_window.mask_y,
+               self->render_state.texture_window.or_x,
+               self->render_state.texture_window.or_y,
+               hd_texture_vram.x, hd_texture_vram.y,
+               hd_texture_vram.width, hd_texture_vram.height,
+               (int)self->render_state.semi_transparent,
+               (int)self->render_state.mask_test,
+               (int)self->render_state.force_mask_bit,
+               (int)self->render_state.texture_color_modulate,
+               (int)self->render_state.primitive_dither,
+               (int)filtering, (int)scaled_read);
+         for (i = 0; i < count; i++)
+            log_cb(RETRO_LOG_INFO,
+                  "[ISSUE890][VTX] n=%u i=%u p=(%.2f,%.2f,%.3f) uv=(%u,%u) color=%08x\n",
+                  issue890_draw, i, vertices[i].x, vertices[i].y,
+                  vertices[i].w, vertices[i].u, vertices[i].v,
+                  vertices[i].color);
+      }
+      issue890_draw++;
+   }
+
    if (scaled_read && hd_texture_vram.height > 0)
    {
       TTRect *read = &self->queue.scaled_read_rect;
