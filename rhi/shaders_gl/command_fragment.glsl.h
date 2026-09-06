@@ -1118,12 +1118,7 @@ STRINGIZE(
             discard;
          }
 
-         if (frag_depth_shift == 0u)
-            frag_color = vec4(1., 0., 0., 1.);
-         else if (frag_depth_shift == 1u)
-            frag_color = vec4(0., 1., 0., 1.);
-         else
-            frag_color = vec4(0., 0., 1., 1.);
+         frag_color = vec4(texel.rgb, 1.);
          return;
 
          // The mask bit written to VRAM is bit 15 of the texture color,
