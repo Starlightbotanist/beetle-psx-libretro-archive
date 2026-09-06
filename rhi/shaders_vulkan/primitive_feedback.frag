@@ -46,8 +46,8 @@ void main()
 	if (SCALE > 1)
 	{
 		float scale = float(SCALE);
-		vec2 origin = floor(gl_FragCoord.xy / scale) * scale;
-		vec2 delta = origin - gl_FragCoord.xy;
+		vec2 center = (floor(gl_FragCoord.xy / scale) + vec2(0.5)) * scale;
+		vec2 delta = center - gl_FragCoord.xy;
 		sample_uv += dFdx(vUV) * delta.x + dFdy(vUV) * delta.y;
 	}
 	vec4 NNColor = sample_vram_atlas(sample_uv);
