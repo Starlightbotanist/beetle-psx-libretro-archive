@@ -401,6 +401,9 @@ static void RecalcHalt(void)
       Halt = true;
 #endif
 
+   if((DMACH[CH_GPU].ChanControl & 0x1000701) == 0x1000201 &&
+      (DMACH[CH_GPU].WordCounter || GPU_DMACanWrite()))
+      Halt = true;
 
    if(!Halt && (DMACH[2].ChanControl & (1U << 24)) && ((DMACH[2].ChanControl & 0x700) == 0x200) && ChCan(2, DMACH[2].ChanControl))
    {
