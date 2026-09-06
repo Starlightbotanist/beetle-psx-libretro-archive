@@ -11,6 +11,7 @@
 
 extern retro_log_printf_t log_cb;
 extern void CPU_DiagArm(void);
+extern void DMA_DiagArm(void);
 
 /* ------------------------------------------------------------------------------ */
 /*  Locals */
@@ -939,7 +940,10 @@ void input_update(bool libretro_supports_bitmasks, retro_input_state_t input_sta
                   "[CDDIAG] input seq=%llu down=%d cross=%d buttons=%04x\n",
                   diag_input_seq++, down, cross, p_input->buttons);
             if((down && !diag_down) || (cross && !diag_cross))
+            {
                CPU_DiagArm();
+               DMA_DiagArm();
+            }
             diag_down = down;
             diag_cross = cross;
          }

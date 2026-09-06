@@ -80,6 +80,37 @@ typedef struct
 
 static Channel DMACH[7];
 static int32_t lastts;
+static bool dma_diag_armed;
+static unsigned dma_diag_events;
+
+extern retro_log_printf_t log_cb;
+
+void DMA_DiagArm(void)
+{
+   dma_diag_armed = true;
+   dma_diag_events = 0;
+   log_cb(RETRO_LOG_INFO, "[DMADIAG] armed\n");
+}
+
+static void DMA_DiagLog(const char *event, int32_t timestamp, int ch,
+      uint32_t address, uint32_t value)
+{
+   if(!dma_diag_armed || dma_diag_events >= 512)
+      return;
+
+   log_cb(RETRO_LOG_INFO,
+         "[DMADIAG] seq=%u event=%s ts=%d ch=%d addr=%08x value=%08x "
+         "madr=%06x bcr=%08x chcr=%08x cur=%06x words=%u clock=%d "
+         "dicr=%08x distat=%02x irqout=%d\n",
+         dma_diag_events++, event, timestamp, ch, address, value,
+         ch >= 0 && ch < 7 ? DMACH[ch].BaseAddr : 0,
+         ch >= 0 && ch < 7 ? DMACH[ch].BlockControl : 0,
+         ch >= 0 && ch < 7 ? DMACH[ch].ChanControl : 0,
+         ch >= 0 && ch < 7 ? DMACH[ch].CurAddr : 0,
+         ch >= 0 && ch < 7 ? DMACH[ch].WordCounter : 0,
+         ch >= 0 && ch < 7 ? DMACH[ch].ClockCounter : 0,
+         DMAIntControl, DMAIntStatus, IRQOut);
+}
 
 static INLINE void RecalcIRQOut(void)
 {
@@ -525,6 +556,8 @@ SkipPayloadStuff: ;
                            DMAIntStatus |= 1U << ch;
                            RecalcIRQOut();
                         }
+                        if(ch == CH_CDC)
+                           DMA_DiagLog("complete", timestamp, ch, 0, 0);
                         break;
                      }
                   }
@@ -590,6 +623,9 @@ void DMA_Write(const int32_t timestamp, uint32_t A, uint32_t V)
    V <<= (A & 3) * 8;
 
    DMA_Update(timestamp);
+
+   if(ch == CH_CDC || ch == 7)
+      DMA_DiagLog("write_before", timestamp, ch, A, V);
 
    switch(A & 0xC)
    {
@@ -679,6 +715,9 @@ void DMA_Write(const int32_t timestamp, uint32_t A, uint32_t V)
 
    if (will_set_event)
       PSX_SetEventNT(PSX_EVENT_DMA, timestamp + CalcNextEvent(0x10000000));
+
+   if(ch == CH_CDC || ch == 7)
+      DMA_DiagLog("write_after", timestamp, ch, A, V);
 }
 
 uint32_t DMA_Read(const int32_t timestamp, uint32_t A)
