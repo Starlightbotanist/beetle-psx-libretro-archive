@@ -2643,7 +2643,7 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
    int x1;
    int y1;
    unsigned i;
-   bool framebuffer_feedback = false;
+   uint8_t framebuffer_feedback = 0;
 
 #ifdef GL_READ_FRAMEBUFFER
    if (v[0].texture_blend_mode != 0 &&
@@ -2677,7 +2677,12 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
                v[0].clut[0], v[0].clut[1], clut_width, 1);
       }
 
-      framebuffer_feedback = texture_gpu_written || clut_gpu_written;
+      if (texture_gpu_written || clut_gpu_written)
+         framebuffer_feedback |= 1;
+      if (texture_dirty)
+         framebuffer_feedback |= 2;
+      if (clut_dirty)
+         framebuffer_feedback |= 4;
 
       if (texture_dirty || clut_dirty)
       {
@@ -7826,7 +7831,7 @@ static void gl_mirror_fb_out_to_fb_texture(gl_renderer *renderer,
          ux, uy, ux + uw, uy + uh,
          (GLint) x, (GLint) y, (GLint)(x + w), (GLint)(y + h),
          GL_COLOR_BUFFER_BIT,
-         allow_with_software_fb ? GL_LINEAR : GL_NEAREST);
+         GL_NEAREST);
 
    /* Some drivers do not make dependency-driven framebuffer mirrors visible
     * to the following texture fetch without explicit completion. */
