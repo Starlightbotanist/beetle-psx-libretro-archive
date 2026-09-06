@@ -19,8 +19,6 @@
 static const char * command_fragment_name_ = GLSL_FRAGMENT(
 uniform sampler2D fb_texture;
 
-uniform uint internal_upscaling;
-
 // Scaling to apply to the dither pattern
 uniform uint dither_scaling;
 // The current render target stores native RGB5 channels. Quantize explicitly
@@ -1044,13 +1042,7 @@ void main() {
       {
          vec4 texel;
          bool hd_on = hd_enabled != 0U;
-         vec2 sample_coord = frag_texture_coord;
-         float scale = float(internal_upscaling);
-         vec2 center = (floor(gl_FragCoord.xy / scale) + vec2(0.5)) * scale;
-         vec2 delta = center - gl_FragCoord.xy;
-         sample_coord += dFdx(frag_texture_coord) * delta.x
-               + dFdy(frag_texture_coord) * delta.y;
-         vec4 texel0 = sample_texel(sample_coord);
+         vec4 texel0 = sample_texel(frag_texture_coord + vec2(0.5));
 				  
 		 opacity = float(!is_transparent(texel0));
 
