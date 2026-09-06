@@ -105,6 +105,7 @@ enum
  * in CPU_New. */
 static PS_CPU            s_cpu;
 PS_CPU                  *PSX_CPU = &s_cpu;
+static unsigned          cpu_diag_exceptions;
 
 /* Interpreter dispatch replication (computed-goto builds only): each
  * opcode handler ends with its own fetch/decode/indirect-jump instead
@@ -839,6 +840,18 @@ static uint32_t NO_INLINE CPU_Exception(uint32_t code, uint32_t PC, const uint32
    uint32_t handler = 0x80000080;
 
    assert(code < 16);
+
+   if(cpu_diag_exceptions < 256 &&
+         (code != EXCEPTION_INT || PC < 0x80000000 || PC >= 0xBFC00000))
+   {
+      log_cb(RETRO_LOG_INFO,
+            "[CPUDIAG] seq=%u code=%u pc=%08x np=%08x instr=%08x "
+            "sr=%08x cause=%08x epc=%08x bdbt=%u ra=%08x sp=%08x "
+            "k0=%08x k1=%08x\n",
+            cpu_diag_exceptions++, code, PC, NP, instr, CP0.SR,
+            CP0.CAUSE, CP0.EPC, BDBT, GPR[31], GPR[29], GPR[26],
+            GPR[27]);
+   }
 
    if (CP0.SR & (1 << 22)) /* BEV */
       handler = 0xBFC00180;

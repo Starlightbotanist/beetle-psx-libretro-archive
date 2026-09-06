@@ -357,6 +357,8 @@ extern retro_log_printf_t log_cb;
 
 static unsigned long long cdc_diag_seq;
 static unsigned long long cdc_diag_reg_reads;
+static unsigned long long cdc_diag_xa_sectors;
+static unsigned long long cdc_diag_data_sectors;
 static int32_t cdc_diag_event_ts;
 
 static void PS_CDC_DiagState(PS_CDC *cdc, const char *event,
@@ -435,6 +437,8 @@ void PS_CDC_SetDisc(PS_CDC *cdc, bool tray_open, CDIF *cdif, const char *disc_id
 
       cdc_diag_seq = 0;
       cdc_diag_reg_reads = 0;
+      cdc_diag_xa_sectors = 0;
+      cdc_diag_data_sectors = 0;
       cdc_diag_event_ts = 0;
       log_cb(RETRO_LOG_INFO,
             "[CDDIAG] disc first=%u last=%u leadout=%u async=%d id=%.4s\n",
@@ -1402,9 +1406,37 @@ void PS_CDC_HandlePlayRead(PS_CDC *cdc, int32_t timestamp)
 
          if(cdc->DriveStatus == DS_READING)
          {
+            if(cdc_diag_data_sectors < 16 || !(cdc_diag_data_sectors & 0xFF))
+            {
+               log_cb(RETRO_LOG_INFO,
+                     "[SECTDIAG] seq=%llu cur=%d header=%02x%02x%02x%02x "
+                     "sub=%02x%02x%02x%02x mode=%02x\n",
+                     cdc_diag_data_sectors, cdc->CurSector, buf[12],
+                     buf[13], buf[14], buf[15], buf[16], buf[17],
+                     buf[18], buf[19], cdc->Mode);
+            }
+            cdc_diag_data_sectors++;
+
             if((cdc->Mode & MODE_STRSND) && (buf[12 + 3] == 0x2) && ((buf[12 + 6] & 0x64) == 0x64))
             {
-               if(PS_CDC_XA_Test(cdc, buf))
+               const XA_Subheader *sh = (const XA_Subheader *)&buf[12 + 4];
+               const bool xa_match = PS_CDC_XA_Test(cdc, buf);
+
+               if(cdc_diag_xa_sectors < 128 || !(cdc_diag_xa_sectors & 0x7F))
+               {
+                  log_cb(RETRO_LOG_INFO,
+                        "[XADIAG] seq=%llu cur=%d file=%02x chan=%02x "
+                        "submode=%02x coding=%02x filter=%02x/%02x "
+                        "mode=%02x match=%d buffer=%u/%u/%u\n",
+                        cdc_diag_xa_sectors, cdc->CurSector, sh->file,
+                        sh->channel, sh->submode, sh->coding,
+                        cdc->FilterFile, cdc->FilterChan, cdc->Mode,
+                        xa_match, cdc->AudioBuffer.ReadPos,
+                        cdc->AudioBuffer.Size, cdc->AudioBuffer.Freq);
+               }
+               cdc_diag_xa_sectors++;
+
+               if(xa_match)
                {
                   if(!(cdc->AudioBuffer.ReadPos < cdc->AudioBuffer.Size))
                      PS_CDC_XA_ProcessSector(cdc, buf, &cdc->AudioBuffer);
