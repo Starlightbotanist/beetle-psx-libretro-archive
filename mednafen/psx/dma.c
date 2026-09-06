@@ -94,6 +94,9 @@ typedef struct
    uint32_t block_control;
    uint32_t channel_control;
    uint32_t current_address;
+   uint32_t spu_transfer_id;
+   uint32_t spu_transfer_base;
+   uint32_t spu_transfer_block_control;
    uint32_t spu_rw_address;
    int32_t spu_control_timestamp;
    int32_t spu_rw_address_timestamp;
@@ -115,6 +118,7 @@ typedef struct
    uint32_t base_address;
    uint32_t block_control;
    uint32_t channel_control;
+   uint32_t transfer_id;
    uint32_t spu_rw_address;
    uint32_t ram_value;
    uint16_t word_count;
@@ -142,6 +146,9 @@ static DMA_DiagSPURegister
       dma_diag_spu_register_history[DMA_DIAG_SPU_REGISTER_HISTORY_SIZE];
 static unsigned dma_diag_spu_register_history_pos;
 static unsigned dma_diag_spu_register_history_count;
+static uint32_t dma_diag_spu_transfer_id;
+static uint32_t dma_diag_spu_transfer_base;
+static uint32_t dma_diag_spu_transfer_block_control;
 
 extern retro_log_printf_t log_cb;
 
@@ -187,9 +194,10 @@ void DMA_DiagDumpTargetWrites(void)
       const DMA_DiagSPUBlock *h = &dma_diag_spu_block_history[slot];
 
       log_cb(RETRO_LOG_INFO,
-            "[SPUDMADIAG] seq=%u ts=%d dir=%s madr=%06x bcr=%08x "
+            "[SPUDMADIAG] seq=%u id=%u ts=%d dir=%s madr=%06x bcr=%08x "
             "chcr=%08x words=%u spuaddr=%05x ram=%08x\n",
-            i, h->timestamp, h->channel_control & 1 ? "write" : "read",
+            i, h->transfer_id, h->timestamp,
+            h->channel_control & 1 ? "write" : "read",
             h->base_address, h->block_control, h->channel_control,
             h->word_count, h->spu_rw_address, h->ram_value);
    }
@@ -225,10 +233,13 @@ void DMA_DiagDumpTargetWrites(void)
       log_cb(RETRO_LOG_INFO,
             "[DMAWRITEDIAG] seq=%u ts=%d ch=%u address=%08x old=%08x "
             "value=%08x madr=%06x bcr=%08x chcr=%08x cur=%06x words=%u "
+            "spuid=%u spubase=%06x spubcr=%08x "
             "spucnt=%04x spustat=%04x spuaddr=%05x cnt_ts=%d addr_ts=%d\n",
             i, h->timestamp, h->channel, h->address, h->old_value,
             h->value, h->base_address, h->block_control,
             h->channel_control, h->current_address, h->word_counter,
+            h->spu_transfer_id, h->spu_transfer_base,
+            h->spu_transfer_block_control,
             h->spu_control, h->spu_status, h->spu_rw_address,
             h->spu_control_timestamp, h->spu_rw_address_timestamp);
    }
@@ -260,6 +271,9 @@ void DMA_Power(void)
    dma_diag_spu_block_history_count = 0;
    dma_diag_spu_register_history_pos = 0;
    dma_diag_spu_register_history_count = 0;
+   dma_diag_spu_transfer_id = 0;
+   dma_diag_spu_transfer_base = 0;
+   dma_diag_spu_transfer_block_control = 0;
 
    memset(DMACH, 0, sizeof(DMACH));
 
@@ -593,6 +607,7 @@ static INLINE void RunChannel(int32_t timestamp, int32_t clocks, int ch)
                   entry->base_address = DMACH[ch].BaseAddr;
                   entry->block_control = DMACH[ch].BlockControl;
                   entry->channel_control = DMACH[ch].ChanControl;
+                  entry->transfer_id = dma_diag_spu_transfer_id;
                   entry->spu_rw_address = SPU_DiagGetRWAddr();
                   entry->ram_value = MASMEM_ReadU32(MainRAM,
                         DMACH[ch].BaseAddr & 0x1FFFFC);
@@ -651,6 +666,10 @@ static INLINE void RunChannel(int32_t timestamp, int32_t clocks, int ch)
                   entry->channel_control = DMACH[ch].ChanControl;
                   entry->current_address = DMACH[ch].CurAddr;
                   entry->word_counter = DMACH[ch].WordCounter;
+                  entry->spu_transfer_id = dma_diag_spu_transfer_id;
+                  entry->spu_transfer_base = dma_diag_spu_transfer_base;
+                  entry->spu_transfer_block_control =
+                        dma_diag_spu_transfer_block_control;
                   entry->spu_control = SPU_DiagGetControl();
                   entry->spu_status = SPU_DiagGetStatus();
                   entry->spu_rw_address = SPU_DiagGetRWAddr();
@@ -871,6 +890,13 @@ void DMA_Write(const int32_t timestamp, uint32_t A, uint32_t V)
 
             if(!(OldCC & (1 << 24)) && (V & (1 << 24)))
             {
+               if(ch == CH_SPU)
+               {
+                  dma_diag_spu_transfer_id++;
+                  dma_diag_spu_transfer_base = DMACH[ch].BaseAddr;
+                  dma_diag_spu_transfer_block_control =
+                        DMACH[ch].BlockControl;
+               }
                DMACH[ch].WordCounter = 0;
                DMACH[ch].ClockCounter = 0;
 
