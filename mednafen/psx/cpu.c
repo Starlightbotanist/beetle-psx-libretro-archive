@@ -162,6 +162,44 @@ static unsigned cpu_diag_printf_history_pos;
 static unsigned cpu_diag_printf_history_count;
 static bool cpu_diag_assert_dumped;
 
+#define CPU_DIAG_TABLE_WRITE_HISTORY_SIZE 512
+typedef struct
+{
+   uint32_t pc;
+   uint32_t instr;
+   uint32_t address;
+   uint32_t value;
+   uint32_t old_value;
+   uint8_t width;
+} CPU_DiagTableWrite;
+
+static CPU_DiagTableWrite
+      cpu_diag_table_write_history[CPU_DIAG_TABLE_WRITE_HISTORY_SIZE];
+static unsigned cpu_diag_table_write_history_pos;
+static unsigned cpu_diag_table_write_history_count;
+
+static INLINE void CPU_DiagRecordTableWrite(uint32_t pc, uint32_t instr,
+      uint32_t address, uint32_t value, uint8_t width)
+{
+   CPU_DiagTableWrite *entry;
+   uint32_t phys_address = address & 0x1FFFFFFF;
+
+   if(phys_address < 0x000E6508 || phys_address >= 0x000E6634)
+      return;
+
+   entry = &cpu_diag_table_write_history[cpu_diag_table_write_history_pos];
+   entry->pc = pc;
+   entry->instr = instr;
+   entry->address = address;
+   entry->value = value;
+   entry->old_value = PSX_MemPeek32(phys_address & ~3);
+   entry->width = width;
+   cpu_diag_table_write_history_pos = (cpu_diag_table_write_history_pos + 1) %
+         CPU_DIAG_TABLE_WRITE_HISTORY_SIZE;
+   if(cpu_diag_table_write_history_count < CPU_DIAG_TABLE_WRITE_HISTORY_SIZE)
+      cpu_diag_table_write_history_count++;
+}
+
 void CPU_DiagArm(void)
 {
    cpu_diag_exceptions = 0;
@@ -204,6 +242,22 @@ static void CPU_DiagTrace(uint32_t pc, uint32_t instr,
             PSX_MemPeek32(address + 0x0C), PSX_MemPeek32(address + 0x10),
             PSX_MemPeek32(address + 0x14), PSX_MemPeek32(address + 0x18),
             PSX_MemPeek32(address + 0x1C));
+      log_cb(RETRO_LOG_INFO, "[TABLEDIAG] history=%u\n",
+            cpu_diag_table_write_history_count);
+      for(i = 0; i < cpu_diag_table_write_history_count; i++)
+      {
+         unsigned slot = (cpu_diag_table_write_history_pos +
+               CPU_DIAG_TABLE_WRITE_HISTORY_SIZE -
+               cpu_diag_table_write_history_count + i) %
+               CPU_DIAG_TABLE_WRITE_HISTORY_SIZE;
+         const CPU_DiagTableWrite *h = &cpu_diag_table_write_history[slot];
+
+         log_cb(RETRO_LOG_INFO,
+               "[TABLEDIAG] seq=%u pc=%08x instr=%08x address=%08x "
+               "width=%u old=%08x value=%08x\n",
+               i, h->pc, h->instr, h->address, h->width,
+               h->old_value, h->value);
+      }
    }
 
    {
@@ -2859,6 +2913,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	uint32_t address = GPR[rs] + immediate;
 
+	if(MDFN_UNLIKELY(((address & 0x1FFFFFFF) - 0x000E6508) < 0x12C))
+	 CPU_DiagRecordTableWrite(PC, instr, address, GPR[rt], 1);
 	WriteMemory_u8(&timestamp, address, GPR[rt]);
 
 	if (PGXP_GetModes() & PGXP_MODE_MEMORY)
@@ -2880,6 +2936,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
         uint32_t address = GPR[rs] + immediate;
 
+	if(MDFN_UNLIKELY(((address & 0x1FFFFFFF) - 0x000E6508) < 0x12C))
+	 CPU_DiagRecordTableWrite(PC, instr, address, GPR[rt], 2);
 	if(MDFN_UNLIKELY(address & 0x1))
 	{
 	 CP0.BADA = address;
@@ -2907,6 +2965,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
         uint32_t address = GPR[rs] + immediate;
 
+	if(MDFN_UNLIKELY(((address & 0x1FFFFFFF) - 0x000E6508) < 0x12C))
+	 CPU_DiagRecordTableWrite(PC, instr, address, GPR[rt], 4);
 	if(MDFN_UNLIKELY(address & 0x3))
 	{
 	 CP0.BADA = address;
@@ -2981,6 +3041,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
         uint32_t address = GPR[rs] + immediate;
 
+	if(MDFN_UNLIKELY(((address & 0x1FFFFFFF) - 0x000E6508) < 0x12C))
+	 CPU_DiagRecordTableWrite(PC, instr, address, GPR[rt], 0);
 	switch(address & 0x3)
 	{
 	 case 0: WriteMemory_u8(&timestamp, address & ~3, GPR[rt] >> 24);
@@ -3060,6 +3122,8 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
         uint32_t address = GPR[rs] + immediate;
 
+	if(MDFN_UNLIKELY(((address & 0x1FFFFFFF) - 0x000E6508) < 0x12C))
+	 CPU_DiagRecordTableWrite(PC, instr, address, GPR[rt], 0);
 	switch(address & 0x3)
 	{
 	 case 0: WriteMemory_u32(&timestamp, address, GPR[rt], false);
