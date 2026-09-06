@@ -36,22 +36,19 @@ layout(constant_id = 7) const int MASK_TEST = 1;
  * the same mix or it un-fogs the primitive. */
 layout(constant_id = 9) const int PGXP_FOG = 0;
 layout(location = 6) in mediump vec4 vFog;
-#ifdef TEXTURED
-layout(constant_id = 5) const int OFFSET_UV_FRAGMENT = 0;
-#endif
 #include "pgxp_fog.h"
 
 
 void main()
 {
 #ifdef TEXTURED
-	vec2 sample_uv = vUV;
 #ifdef UNSCALED
-	if (SCALE > 1)
-		sample_uv += vec2(0.5 / float(SCALE) -
-			(OFFSET_UV_FRAGMENT != 0 ? 0.5 : 0.0));
+	FragColor = vec4(0.0, 1.0, 1.0, 1.0);
+#else
+	FragColor = vec4(1.0, 0.0, 1.0, 1.0);
 #endif
-	vec4 NNColor = sample_vram_atlas(sample_uv);
+	return;
+	vec4 NNColor = sample_vram_atlas(vUV);
 	if (all(equal(NNColor, vec4(0.0))))
 		discard;
 	vec4 color = NNColor;

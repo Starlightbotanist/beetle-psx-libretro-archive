@@ -55,9 +55,6 @@ layout(constant_id = 8) const int PRECISE_COLOR = 0;
  * only where the feature is live. */
 layout(constant_id = 9) const int PGXP_FOG = 0;
 layout(location = 6) in mediump vec4 vFog;
-#ifdef TEXTURED
-layout(constant_id = 5) const int OFFSET_UV_FRAGMENT = 0;
-#endif
 
 #include "pgxp_fog.h"
 
@@ -66,12 +63,14 @@ void main()
 	float opacity = 1.0;
 #ifdef TEXTURED
 	vec4 NNColor;
-	vec2 sample_uv = vUV;
 #ifdef UNSCALED
-	if (SCALE > 1)
-		sample_uv += vec2(0.5 / float(SCALE) -
-			(OFFSET_UV_FRAGMENT != 0 ? 0.5 : 0.0));
+	FragColor = FILTER_TYPE == FILTER_NEAREST ?
+		vec4(0.0, 0.0, 1.0, 1.0) : vec4(0.0, 1.0, 0.0, 1.0);
+#else
+	FragColor = FILTER_TYPE == FILTER_NEAREST ?
+		vec4(1.0, 0.0, 0.0, 1.0) : vec4(1.0, 1.0, 0.0, 1.0);
 #endif
+	return;
 
 	bool fastpath = (vParam.z & 0x100) != 0;
 	bool hd_enabled = !fastpath && (vParam.z & 0x200) == 0;
@@ -79,11 +78,11 @@ void main()
 
 	vec4 hdColor;
 	if (fastpath) {
-		NNColor = sample_hd_fast(sample_uv);
-	} else if (hd_enabled && sample_hd_texture_nearest_hack(sample_uv, hdColor)) {
+		NNColor = sample_hd_fast(vUV);
+	} else if (hd_enabled && sample_hd_texture_nearest_hack(vUV, hdColor)) {
 		NNColor = hdColor;
 	} else {
-		NNColor = sample_vram_atlas(sample_uv);
+		NNColor = sample_vram_atlas(vUV);
 	}
 
 	// Even for opaque draw calls, this pixel is transparent.
@@ -117,7 +116,7 @@ void main()
 	// hd texture filtering
 	if (hd_enabled) {
 		bool valid = true;
-		vec4 hd_color = sample_hd_texture_trilinear(sample_uv, valid);
+		vec4 hd_color = sample_hd_texture_trilinear(vUV, valid);
 		if (valid) {
 			color = hd_color;
 			opacity = hd_color.a;
