@@ -118,6 +118,9 @@ void main()
 	if (opacity < 0.5)
 		discard;
 
+	FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+	return;
+
 	bool fixed_feedback = (uint(vParam.z) & 0x800u) != 0u;
 	if (fixed_feedback)
 	{

@@ -45,6 +45,8 @@ void main()
 	vec4 NNColor = sample_vram_atlas(vUV);
 	if (all(equal(NNColor, vec4(0.0))))
 		discard;
+	FragColor = vec4(0.0, 1.0, 1.0, 1.0);
+	return;
 
 	vec4 color = NNColor;
 
