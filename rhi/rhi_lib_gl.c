@@ -2688,8 +2688,8 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
 
          if (texture_dirty)
             gl_vram_sync_mirror_rect(renderer,
-                  producer_rect.x, producer_rect.y,
-                  producer_rect.width, producer_rect.height);
+                  texture_rect.x, texture_rect.y,
+                  texture_rect.width, texture_rect.height);
 
          /* A texture resolve may already have covered the palette row. */
          if (clut_dirty && gl_vram_sync_rect_is_dirty(renderer,
