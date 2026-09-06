@@ -62,6 +62,22 @@ void main()
 {
 	float opacity = 1.0;
 #ifdef TEXTURED
+#if defined(UNSCALED)
+	bool issue890_right = gl_FragCoord.x >= 256.0;
+#else
+	bool issue890_right = gl_FragCoord.x >= 256.0 * float(SCALE);
+#endif
+	if (issue890_right)
+	{
+		bool issue890_tile = all(equal(vBaseUV, ivec2(640, 0))) &&
+			all(equal(vParam.xy, ivec2(560, 483))) &&
+			(vParam.z & 3) == 2 &&
+			all(equal(vTexLimits, ivec4(192, 0, 255, 31)));
+		FragColor = issue890_tile ? vec4(0.0, 1.0, 0.0, 1.0) :
+			vec4(1.0, 0.0, 1.0, 1.0);
+		return;
+	}
+
 	vec4 NNColor;
 
 	bool fastpath = (vParam.z & 0x100) != 0;
