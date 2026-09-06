@@ -120,6 +120,8 @@ static uint64_t gpu_diag_cpu_gp0_accepted;
 static uint64_t gpu_diag_cpu_gp1_writes;
 static uint64_t gpu_diag_cpu_status_reads;
 static uint64_t gpu_diag_cpu_data_reads;
+static int32_t gpu_diag_last_status_timestamp;
+static uint32_t gpu_diag_last_status_value;
 static int32_t gpu_diag_last_gp0_timestamp;
 static uint32_t gpu_diag_last_gp0_addr;
 static uint32_t gpu_diag_last_gp0_raw_value;
@@ -1845,6 +1847,9 @@ uint32_t GPU_Read(const int32_t timestamp, uint32_t A)
          ret |= 1 << 12;
 
       ret |= GPU.TexDisable << 15;
+
+      gpu_diag_last_status_timestamp = timestamp;
+      gpu_diag_last_status_value = ret;
    }
    else     /* "Data" */
    {
@@ -2983,6 +2988,11 @@ void GPU_GetDMADiagnosticState(GPUDMADiagnosticState *state)
    state->cpu_gp1_writes = gpu_diag_cpu_gp1_writes;
    state->cpu_status_reads = gpu_diag_cpu_status_reads;
    state->cpu_data_reads = gpu_diag_cpu_data_reads;
+   state->last_status_timestamp = gpu_diag_last_status_timestamp;
+   state->last_status_value = gpu_diag_last_status_value;
+   state->scanline = GPU.scanline;
+   state->field = GPU.field;
+   state->in_vblank = GPU.InVBlank;
    state->last_gp0_timestamp = gpu_diag_last_gp0_timestamp;
    state->last_gp0_addr = gpu_diag_last_gp0_addr;
    state->last_gp0_raw_value = gpu_diag_last_gp0_raw_value;

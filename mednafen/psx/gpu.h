@@ -295,6 +295,11 @@ typedef struct
    uint64_t cpu_gp1_writes;
    uint64_t cpu_status_reads;
    uint64_t cpu_data_reads;
+   int32_t last_status_timestamp;
+   uint32_t last_status_value;
+   uint32_t scanline;
+   uint32_t field;
+   uint32_t in_vblank;
    int32_t last_gp0_timestamp;
    uint32_t last_gp0_addr;
    uint32_t last_gp0_raw_value;
