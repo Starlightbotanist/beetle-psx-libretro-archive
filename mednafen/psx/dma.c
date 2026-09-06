@@ -108,7 +108,7 @@ static DMA_DiagTargetWrite
 static unsigned dma_diag_target_write_history_pos;
 static unsigned dma_diag_target_write_history_count;
 
-#define DMA_DIAG_SPU_BLOCK_HISTORY_SIZE 256
+#define DMA_DIAG_SPU_BLOCK_HISTORY_SIZE 4096
 typedef struct
 {
    int32_t timestamp;
@@ -124,6 +124,24 @@ static DMA_DiagSPUBlock
       dma_diag_spu_block_history[DMA_DIAG_SPU_BLOCK_HISTORY_SIZE];
 static unsigned dma_diag_spu_block_history_pos;
 static unsigned dma_diag_spu_block_history_count;
+
+#define DMA_DIAG_SPU_REGISTER_HISTORY_SIZE 256
+typedef struct
+{
+   int32_t timestamp;
+   uint32_t address;
+   uint32_t value;
+   uint32_t base_address;
+   uint32_t block_control;
+   uint32_t channel_control;
+   uint32_t current_address;
+   uint16_t word_counter;
+} DMA_DiagSPURegister;
+
+static DMA_DiagSPURegister
+      dma_diag_spu_register_history[DMA_DIAG_SPU_REGISTER_HISTORY_SIZE];
+static unsigned dma_diag_spu_register_history_pos;
+static unsigned dma_diag_spu_register_history_count;
 
 extern retro_log_printf_t log_cb;
 
@@ -176,6 +194,24 @@ void DMA_DiagDumpTargetWrites(void)
             h->word_count, h->spu_rw_address, h->ram_value);
    }
 
+   log_cb(RETRO_LOG_INFO, "[SPUREGDIAG] writes=%u\n",
+         dma_diag_spu_register_history_count);
+   for(i = 0; i < dma_diag_spu_register_history_count; i++)
+   {
+      unsigned slot = (dma_diag_spu_register_history_pos +
+            DMA_DIAG_SPU_REGISTER_HISTORY_SIZE -
+            dma_diag_spu_register_history_count + i) %
+            DMA_DIAG_SPU_REGISTER_HISTORY_SIZE;
+      const DMA_DiagSPURegister *h = &dma_diag_spu_register_history[slot];
+
+      log_cb(RETRO_LOG_INFO,
+            "[SPUREGDIAG] seq=%u ts=%d address=%08x value=%08x "
+            "madr=%06x bcr=%08x chcr=%08x cur=%06x words=%u\n",
+            i, h->timestamp, h->address, h->value, h->base_address,
+            h->block_control, h->channel_control, h->current_address,
+            h->word_counter);
+   }
+
    log_cb(RETRO_LOG_INFO, "[DMAWRITEDIAG] history=%u\n",
          dma_diag_target_write_history_count);
    for(i = 0; i < dma_diag_target_write_history_count; i++)
@@ -222,6 +258,8 @@ void DMA_Power(void)
    dma_diag_target_write_history_count = 0;
    dma_diag_spu_block_history_pos = 0;
    dma_diag_spu_block_history_count = 0;
+   dma_diag_spu_register_history_pos = 0;
+   dma_diag_spu_register_history_count = 0;
 
    memset(DMACH, 0, sizeof(DMACH));
 
@@ -858,6 +896,27 @@ void DMA_Write(const int32_t timestamp, uint32_t A, uint32_t V)
 
    if (will_set_event)
       PSX_SetEventNT(PSX_EVENT_DMA, timestamp + CalcNextEvent(0x10000000));
+
+   if(ch == CH_SPU)
+   {
+      DMA_DiagSPURegister *entry = &dma_diag_spu_register_history[
+            dma_diag_spu_register_history_pos];
+
+      entry->timestamp = timestamp;
+      entry->address = A;
+      entry->value = V;
+      entry->base_address = DMACH[ch].BaseAddr;
+      entry->block_control = DMACH[ch].BlockControl;
+      entry->channel_control = DMACH[ch].ChanControl;
+      entry->current_address = DMACH[ch].CurAddr;
+      entry->word_counter = DMACH[ch].WordCounter;
+      dma_diag_spu_register_history_pos =
+            (dma_diag_spu_register_history_pos + 1) %
+            DMA_DIAG_SPU_REGISTER_HISTORY_SIZE;
+      if(dma_diag_spu_register_history_count <
+            DMA_DIAG_SPU_REGISTER_HISTORY_SIZE)
+         dma_diag_spu_register_history_count++;
+   }
 
    if(ch == CH_CDC || ch == 7)
       DMA_DiagLog("write_after", timestamp, ch, A, V);
