@@ -166,7 +166,8 @@ void main()
 		shaded = max(shaded_hot, vec3(0.0));
 	FragColor = vec4(shaded, NNColor.a + vColor.a);
 #else
-	FragColor = vec4((PGXP_FOG != 0) ? pgxp_fog_mix(vColor.rgb, vFog) : vColor.rgb, vColor.a);
+	FragColor = vec4(0.0, 1.0, 0.0, 1.0);
+	return;
 #endif
 
 	// Get round down behavior instead of round-to-nearest.

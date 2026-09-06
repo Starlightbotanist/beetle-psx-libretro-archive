@@ -70,6 +70,11 @@ void main()
 	if (MASK_TEST != 0 && fbcolor.a > 0.5)
 		discard;
 
+#ifndef TEXTURED
+	FragColor = vec4(1.0, 1.0, 0.0, 1.0);
+	return;
+#endif
+
 	vec3 blended;
 	if (BLEND_MODE == BLEND_ADD)
 		blended = mix(shaded, add_src + fbcolor.rgb, blend_amt);
