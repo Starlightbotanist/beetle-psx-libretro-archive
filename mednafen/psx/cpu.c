@@ -160,6 +160,7 @@ typedef struct
 static CPU_DiagPrintfHistory cpu_diag_printf_history[CPU_DIAG_PRINTF_HISTORY_SIZE];
 static unsigned cpu_diag_printf_history_pos;
 static unsigned cpu_diag_printf_history_count;
+static bool cpu_diag_assert_dumped;
 
 void CPU_DiagArm(void)
 {
@@ -171,6 +172,7 @@ void CPU_DiagArm(void)
    cpu_diag_bios_history_count = 0;
    cpu_diag_printf_history_pos = 0;
    cpu_diag_printf_history_count = 0;
+   cpu_diag_assert_dumped = false;
    cpu_diag_prev_valid = false;
    cpu_diag_armed = true;
    log_cb(RETRO_LOG_INFO, "[CPUDIAG] armed\n");
@@ -189,6 +191,21 @@ static void CPU_DiagTrace(uint32_t pc, uint32_t instr,
       return;
 
    phys_pc = pc & 0x1FFFFFFF;
+   if(!cpu_diag_assert_dumped && pc == 0x8001CED8 && !gpr[5])
+   {
+      uint32_t address = gpr[16] & 0x1FFFFFFF;
+
+      cpu_diag_assert_dumped = true;
+      log_cb(RETRO_LOG_INFO,
+            "[ASSERTDIAG] pc=%08x ti=%08x arg1=%08x ra=%08x "
+            "data=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x\n",
+            pc, gpr[16], gpr[17], gpr[31], PSX_MemPeek32(address + 0x00),
+            PSX_MemPeek32(address + 0x04), PSX_MemPeek32(address + 0x08),
+            PSX_MemPeek32(address + 0x0C), PSX_MemPeek32(address + 0x10),
+            PSX_MemPeek32(address + 0x14), PSX_MemPeek32(address + 0x18),
+            PSX_MemPeek32(address + 0x1C));
+   }
+
    {
       uint32_t event_type = 0;
       bool in_rom = phys_pc >= 0x1FC00000;
@@ -233,7 +250,7 @@ static void CPU_DiagTrace(uint32_t pc, uint32_t instr,
       printf_entry->ra = gpr[31];
       for(i = 0; i < sizeof(printf_entry->format) - 1; i++)
       {
-         uint8_t c = PSX_MemPeek8(gpr[4] + i);
+         uint8_t c = PSX_MemPeek8((gpr[4] + i) & 0x1FFFFFFF);
 
          if(!c)
             break;
