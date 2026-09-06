@@ -269,7 +269,7 @@ static INLINE void ChRW(const unsigned ch, const uint32_t CRModeCache, const uin
 #endif
          if(!(CRModeCache & 0x1))
          {
-            extra_cyc_overhead = 8;	/* FIXME: Test. */
+            extra_cyc_overhead = 23;	/* FIXME: Test. */
             *V = CDC_DMARead();		/* Note: Legend of Mana's opening movie is sensitive to DMA timing, including CDC. */
          }
          break;
