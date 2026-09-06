@@ -918,6 +918,7 @@ typedef struct gl_draw_buffer gl_draw_buffer;
 #define GL_VRAM_SYNC_TILES_X (VRAM_WIDTH_PIXELS / GL_VRAM_SYNC_TILE_SIZE)
 #define GL_VRAM_SYNC_TILES_Y (VRAM_HEIGHT / GL_VRAM_SYNC_TILE_SIZE)
 #define GL_VRAM_SYNC_WRITERS_PER_TILE 8u
+#define GL_FRAME_DIAG_QUERY_COUNT 16u
 
 struct gl_vram_sync_writer
 {
@@ -1062,6 +1063,25 @@ struct gl_renderer {
       unsigned dependency_mirrors;
       unsigned max_native_pixels;
    } vram_sync_diag;
+
+   struct
+   {
+      retro_time_t cpu_begin;
+      uint64_t cpu_total_us;
+      uint64_t gpu_total_us;
+      uint64_t queries_frame[GL_FRAME_DIAG_QUERY_COUNT];
+      GLuint queries[GL_FRAME_DIAG_QUERY_COUNT];
+      bool pending[GL_FRAME_DIAG_QUERY_COUNT];
+      bool initialized;
+      bool supported;
+      bool active;
+      unsigned write;
+      unsigned cpu_count;
+      unsigned gpu_count;
+      unsigned disjoint_count;
+      unsigned cpu_max_us;
+      unsigned gpu_max_us;
+   } frame_diag;
 };
 typedef struct gl_renderer gl_renderer;
 
@@ -4388,6 +4408,16 @@ static void gl_renderer_free(gl_renderer *renderer)
    if (!renderer)
       return;
 
+#ifdef HAVE_OPENGLES3
+   if (renderer->frame_diag.supported)
+   {
+      if (renderer->frame_diag.active)
+         glEndQueryEXT(GL_TIME_ELAPSED_EXT);
+      glDeleteQueriesEXT(GL_FRAME_DIAG_QUERY_COUNT,
+            renderer->frame_diag.queries);
+   }
+#endif
+
    if (renderer->command_buffer)
    {
       gl_draw_buffer_free(renderer->command_buffer);
@@ -6036,6 +6066,125 @@ void rhi_gl_refresh_variables(void)
    }
 }
 
+static void gl_frame_diag_prepare(gl_renderer *renderer)
+{
+   unsigned i;
+
+   renderer->frame_diag.cpu_begin = cpu_features_get_time_usec();
+
+#ifdef HAVE_OPENGLES3
+   if (!renderer->frame_diag.initialized)
+   {
+      const char *extensions = (const char *)glGetString(GL_EXTENSIONS);
+      renderer->frame_diag.initialized = true;
+      renderer->frame_diag.supported = extensions &&
+            strstr(extensions, "GL_EXT_disjoint_timer_query") &&
+            glGenQueriesEXT && glDeleteQueriesEXT &&
+            glBeginQueryEXT && glEndQueryEXT &&
+            glGetQueryObjectuivEXT && glGetQueryObjectui64vEXT;
+      if (renderer->frame_diag.supported)
+         glGenQueriesEXT(GL_FRAME_DIAG_QUERY_COUNT,
+               renderer->frame_diag.queries);
+      log_cb(RETRO_LOG_INFO, "[GL frame perf] gpu_timer=%s\n",
+            renderer->frame_diag.supported ? "available" : "unavailable");
+   }
+
+   if (renderer->frame_diag.supported)
+   {
+      for (i = 0; i < GL_FRAME_DIAG_QUERY_COUNT; i++)
+      {
+         GLuint available = 0;
+         GLuint64 elapsed_ns = 0;
+         GLint disjoint = 0;
+         unsigned elapsed_us;
+
+         if (!renderer->frame_diag.pending[i])
+            continue;
+
+         glGetQueryObjectuivEXT(renderer->frame_diag.queries[i],
+               GL_QUERY_RESULT_AVAILABLE, &available);
+         if (!available)
+            continue;
+
+         glGetIntegerv(GL_GPU_DISJOINT_EXT, &disjoint);
+         glGetQueryObjectui64vEXT(renderer->frame_diag.queries[i],
+               GL_QUERY_RESULT, &elapsed_ns);
+         renderer->frame_diag.pending[i] = false;
+         if (disjoint)
+         {
+            renderer->frame_diag.disjoint_count++;
+            continue;
+         }
+
+         elapsed_us = (unsigned)(elapsed_ns / 1000u);
+         renderer->frame_diag.gpu_total_us += elapsed_us;
+         renderer->frame_diag.gpu_count++;
+         if (elapsed_us > renderer->frame_diag.gpu_max_us)
+            renderer->frame_diag.gpu_max_us = elapsed_us;
+      }
+
+      if (!renderer->frame_diag.pending[renderer->frame_diag.write])
+      {
+         glBeginQueryEXT(GL_TIME_ELAPSED_EXT,
+               renderer->frame_diag.queries[renderer->frame_diag.write]);
+         renderer->frame_diag.queries_frame[renderer->frame_diag.write] =
+               renderer->vram_sync_diag.frame;
+         renderer->frame_diag.active = true;
+      }
+   }
+#else
+   (void)i;
+#endif
+}
+
+static void gl_frame_diag_finalize(gl_renderer *renderer)
+{
+   retro_time_t end;
+   unsigned elapsed_us;
+
+#ifdef HAVE_OPENGLES3
+   if (renderer->frame_diag.active)
+   {
+      glEndQueryEXT(GL_TIME_ELAPSED_EXT);
+      renderer->frame_diag.pending[renderer->frame_diag.write] = true;
+      renderer->frame_diag.write =
+            (renderer->frame_diag.write + 1) % GL_FRAME_DIAG_QUERY_COUNT;
+      renderer->frame_diag.active = false;
+   }
+#endif
+
+   end = cpu_features_get_time_usec();
+   elapsed_us = (unsigned)(end - renderer->frame_diag.cpu_begin);
+   renderer->frame_diag.cpu_total_us += elapsed_us;
+   renderer->frame_diag.cpu_count++;
+   if (elapsed_us > renderer->frame_diag.cpu_max_us)
+      renderer->frame_diag.cpu_max_us = elapsed_us;
+
+   if (renderer->frame_diag.cpu_count >= 120)
+   {
+      log_cb(RETRO_LOG_INFO,
+            "[GL frame perf] frames=%u cpu_avg_us=%llu cpu_max_us=%u "
+            "gpu_samples=%u gpu_avg_us=%llu gpu_max_us=%u disjoint=%u\n",
+            renderer->frame_diag.cpu_count,
+            (unsigned long long)(renderer->frame_diag.cpu_total_us /
+                  renderer->frame_diag.cpu_count),
+            renderer->frame_diag.cpu_max_us,
+            renderer->frame_diag.gpu_count,
+            (unsigned long long)(renderer->frame_diag.gpu_count ?
+                  renderer->frame_diag.gpu_total_us /
+                  renderer->frame_diag.gpu_count : 0),
+            renderer->frame_diag.gpu_max_us,
+            renderer->frame_diag.disjoint_count);
+      renderer->frame_diag.cpu_total_us = 0;
+      renderer->frame_diag.gpu_total_us = 0;
+      renderer->frame_diag.cpu_count = 0;
+      renderer->frame_diag.gpu_count = 0;
+      renderer->frame_diag.disjoint_count = 0;
+      renderer->frame_diag.cpu_max_us = 0;
+      renderer->frame_diag.gpu_max_us = 0;
+   }
+}
+
 void rhi_gl_prepare_frame(void)
 {
    gl_renderer *renderer;
@@ -6055,6 +6204,8 @@ void rhi_gl_prepare_frame(void)
       static_renderer.state = GL_STATE_INVALID;
       return;
    }
+
+   gl_frame_diag_prepare(renderer);
 
    gl_normalize_inherited_state();
 
@@ -6404,6 +6555,8 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
    renderer->vram_sync_diag.max_native_pixels = 0;
 
    cleanup_gl_state();
+
+   gl_frame_diag_finalize(renderer);
 
    /* When using a hardware renderer we set the data pointer to
     * -1 to notify the frontend that the frame has been rendered
