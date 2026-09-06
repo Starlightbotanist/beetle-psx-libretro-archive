@@ -80,13 +80,6 @@ extern int   psx_color_format;
  * under it because it is the one directory the core already writes to. */
 extern char  retro_save_directory[4096];
 
-static uint64_t jf_diag_frame;
-static unsigned jf_diag_scaled_primitives;
-static unsigned jf_diag_scaled_reads;
-static unsigned jf_diag_scaled_syncs;
-static unsigned jf_diag_scaled_resolves;
-static unsigned jf_diag_logged_primitives;
-
 /* VOLK_GENERATE_PROTOTYPES_H */
 #if defined(VK_VERSION_1_0)
 extern PFN_vkAllocateCommandBuffers vkAllocateCommandBuffers;
@@ -5229,29 +5222,6 @@ static StatusFlags *fbatlas_info(FBAtlas *self,
       return &self->fb_info[NUM_BLOCKS_X * block_y + block_x];
    }
 
-static void jf_diag_atlas_snapshot(FBAtlas *self, const TTRect *rect,
-      unsigned ownership[4], unsigned *rendered, unsigned *flags)
-{
-   unsigned xbegin = rect->x / BLOCK_WIDTH;
-   unsigned xend = (rect->x + rect->width - 1) / BLOCK_WIDTH;
-   unsigned ybegin = rect->y / BLOCK_HEIGHT;
-   unsigned yend = (rect->y + rect->height - 1) / BLOCK_HEIGHT;
-   unsigned x, y;
-
-   ownership[0] = ownership[1] = ownership[2] = ownership[3] = 0;
-   *rendered = 0;
-   *flags = 0;
-   for (y = ybegin; y <= yend; y++)
-      for (x = xbegin; x <= xend; x++)
-      {
-         StatusFlags status = *fbatlas_info(self, x, y);
-         ownership[status & STATUS_OWNERSHIP_MASK]++;
-         if (status & STATUS_TEXTURE_RENDERED)
-            (*rendered)++;
-         *flags |= status;
-      }
-}
-
    static void fbatlas_init(FBAtlas *a)
    {
       unsigned i;
@@ -5661,6 +5631,7 @@ struct OpaqueQueue
 
    Rect2DVec scaled_resolves;
    Rect2DVec unscaled_resolves;
+   Rect2DVec scaled_texture_reads;
    BlitInfoVec scaled_blits;
    BlitInfoVec scaled_masked_blits;
    BlitInfoVec unscaled_blits;
@@ -5687,6 +5658,7 @@ static void opaque_queue_init(struct OpaqueQueue *q)
    OQ_VEC_ZERO(q->semi_transparent_state);
    OQ_VEC_ZERO(q->scaled_resolves);
    OQ_VEC_ZERO(q->unscaled_resolves);
+   OQ_VEC_ZERO(q->scaled_texture_reads);
    OQ_VEC_ZERO(q->scaled_blits);
    OQ_VEC_ZERO(q->scaled_masked_blits);
    OQ_VEC_ZERO(q->unscaled_blits);
@@ -8863,7 +8835,6 @@ static void renderer_resolve(Renderer *self,
 {
    if (target_domain == Domain_Scaled)
       {
-         jf_diag_scaled_resolves++;
          VkRect2D _vpush = { { (int)(x), (int)(y) }, { BLOCK_WIDTH, BLOCK_HEIGHT } };
          Rect2DVec_push(&self->queue.scaled_resolves, &_vpush);
       }
@@ -9096,37 +9067,6 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    }
    offset_uv = self->scaled_uv_offset && self->render_state.primitive_type == PrimitiveType_Polygon;
 
-   if (scaled_read)
-   {
-      unsigned i;
-      jf_diag_scaled_primitives++;
-      if (jf_diag_logged_primitives < 64)
-      {
-         log_cb(RETRO_LOG_INFO,
-               "[JFVK prim] f=%llu n=%u dst=%u,%u,%u,%u tex=%u,%u,%u,%u mode=%u uv=%u,%u-%u,%u tw=%u,%u,%u,%u\n",
-               (unsigned long long)jf_diag_frame, jf_diag_scaled_primitives,
-               rect.x, rect.y, rect.width, rect.height,
-               hd_texture_vram.x, hd_texture_vram.y,
-               hd_texture_vram.width, hd_texture_vram.height,
-               (unsigned)self->render_state.texture_mode,
-               self->render_state.UVLimits.min_u,
-               self->render_state.UVLimits.min_v,
-               self->render_state.UVLimits.max_u,
-               self->render_state.UVLimits.max_v,
-               self->render_state.texture_window.mask_x,
-               self->render_state.texture_window.mask_y,
-               self->render_state.texture_window.or_x,
-               self->render_state.texture_window.or_y);
-         for (i = 0; i < count; i++)
-            log_cb(RETRO_LOG_INFO,
-                  "[JFVK vert] f=%llu n=%u i=%u xyw=%.3f,%.3f,%.6f uv=%u,%u\n",
-                  (unsigned long long)jf_diag_frame,
-                  jf_diag_scaled_primitives, i,
-                  vertices[i].x, vertices[i].y, vertices[i].w,
-                  vertices[i].u, vertices[i].v);
-         jf_diag_logged_primitives++;
-      }
-   }
    z = renderer_allocate_depth(self, scaled_read ? Domain_Scaled : Domain_Unscaled, &rect);
    vram_prov_op(self, (int)rect.x, (int)rect.y,
          (int)rect.width, (int)rect.height, 1);
@@ -9603,33 +9543,14 @@ static const ClearCandidate * renderer_find_clear_candidate(Renderer *self,
    return ret;
 }
 
-static bool renderer_queue_has_scaled_read(const Renderer *self)
-{
-   unsigned i;
-   for (i = 0; i < PrimitiveInfoVec_size((PrimitiveInfoVec *)&self->queue.opaque_textured_scissor); i++)
-      if (PrimitiveInfoVec_at((PrimitiveInfoVec *)&self->queue.opaque_textured_scissor, i)->scaled_read)
-         return true;
-   for (i = 0; i < PrimitiveInfoVec_size((PrimitiveInfoVec *)&self->queue.semi_transparent_opaque_scissor); i++)
-      if (PrimitiveInfoVec_at((PrimitiveInfoVec *)&self->queue.semi_transparent_opaque_scissor, i)->scaled_read)
-         return true;
-   for (i = 0; i < SemiTransparentStateVec_size((SemiTransparentStateVec *)&self->queue.semi_transparent_state); i++)
-      if (SemiTransparentStateVec_at((SemiTransparentStateVec *)&self->queue.semi_transparent_state, i)->scaled_read)
-         return true;
-   return false;
-}
-
 static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
 {
    RenderPassInfo_Subpass subpass;
    renderer_ensure_command_buffer(self);
 
-   if (self->msaa == 1 && renderer_queue_has_scaled_read(self))
+   if (self->msaa == 1 && !Rect2DVec_empty(&self->queue.scaled_texture_reads))
    {
-      VkOffset3D origin = { 0, 0, 0 };
-      VkOffset3D extent = {
-         (int32_t)(FB_WIDTH * self->scaling),
-         (int32_t)(FB_HEIGHT * self->scaling), 1
-      };
+      unsigned i;
 
       renderer_flush_blits(self);
       renderer_flush_resolves(self);
@@ -9643,11 +9564,23 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
-      commandbuffer_blit_image(cbh_get(&self->cmd),
-            ih_get(&self->scaled_read_snapshot),
-            ih_get(&self->scaled_framebuffer),
-            &origin, &extent, &origin, &extent,
-            0, 0, 0, 0, 1, VK_FILTER_NEAREST);
+      for (i = 0; i < Rect2DVec_size(&self->queue.scaled_texture_reads); i++)
+      {
+         const VkRect2D *rect = Rect2DVec_at(&self->queue.scaled_texture_reads, i);
+         VkOffset3D offset = {
+            rect->offset.x * (int32_t)self->scaling,
+            rect->offset.y * (int32_t)self->scaling, 0
+         };
+         VkOffset3D extent = {
+            (int32_t)(rect->extent.width * self->scaling),
+            (int32_t)(rect->extent.height * self->scaling), 1
+         };
+         commandbuffer_blit_image(cbh_get(&self->cmd),
+               ih_get(&self->scaled_read_snapshot),
+               ih_get(&self->scaled_framebuffer),
+               &offset, &extent, &offset, &extent,
+               0, 0, 0, 0, 1, VK_FILTER_NEAREST);
+      }
       commandbuffer_image_barrier(cbh_get(&self->cmd),
             ih_get(&self->scaled_read_snapshot),
             VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
@@ -10595,6 +10528,7 @@ static void renderer_fini(Renderer *self)
    SemiTransparentStateVec_free_storage(&self->queue.semi_transparent_state);
    Rect2DVec_free_storage(&self->queue.scaled_resolves);
    Rect2DVec_free_storage(&self->queue.unscaled_resolves);
+   Rect2DVec_free_storage(&self->queue.scaled_texture_reads);
    BlitInfoVec_free_storage(&self->queue.scaled_blits);
    BlitInfoVec_free_storage(&self->queue.scaled_masked_blits);
    BlitInfoVec_free_storage(&self->queue.unscaled_blits);
@@ -10627,6 +10561,7 @@ static void renderer_reset_queue(Renderer *self)
    BufferVertexVec_clear(&self->queue.semi_transparent_opaque);
    PrimitiveInfoVec_clear(&self->queue.semi_transparent_opaque_scissor);
    ClearCandidateVec_clear(&self->queue.clear_candidates);
+   Rect2DVec_clear(&self->queue.scaled_texture_reads);
    self->primitive_index = 0;
    self->render_pass_is_feedback = false;
 
@@ -18686,13 +18621,38 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       fbatlas_read_domain(self, domain, Stage_Fragment, rect);
    }
 
+static void fbatlas_queue_scaled_texture_read(FBAtlas *self,
+      const TTRect *rect)
+{
+   unsigned x[2], y[2], width[2], height[2];
+   unsigned nx, ny, i, j;
+
+   x[0] = rect->x & (FB_WIDTH - 1);
+   y[0] = rect->y & (FB_HEIGHT - 1);
+   width[0] = min_(rect->width, FB_WIDTH - x[0]);
+   height[0] = min_(rect->height, FB_HEIGHT - y[0]);
+   nx = rect->width > width[0] ? 2 : 1;
+   ny = rect->height > height[0] ? 2 : 1;
+   x[1] = 0;
+   y[1] = 0;
+   width[1] = rect->width - width[0];
+   height[1] = rect->height - height[0];
+
+   for (j = 0; j < ny; j++)
+      for (i = 0; i < nx; i++)
+      {
+         VkRect2D copy = {
+            { (int32_t)x[i], (int32_t)y[j] },
+            { width[i], height[j] }
+         };
+         Rect2DVec_push(&self->listener->queue.scaled_texture_reads, &copy);
+      }
+}
+
    static void fbatlas_read_texture(FBAtlas *self, Domain domain)
    {
       TTRect shifted = self->renderpass.texture_window;
       bool palette;
-      unsigned before_ownership[4], after_ownership[4];
-      unsigned before_rendered, after_rendered;
-      unsigned before_flags, after_flags;
       switch (self->renderpass.texture_mode)
       {
          case TextureMode_Palette4bpp:
@@ -18708,31 +18668,10 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       shifted.y += self->renderpass.texture_offset_y;
 
       if (domain == Domain_Scaled)
-      {
-         jf_diag_scaled_reads++;
-         if (jf_diag_scaled_reads <= 128)
-            jf_diag_atlas_snapshot(self, &shifted, before_ownership,
-                  &before_rendered, &before_flags);
-      }
+         fbatlas_queue_scaled_texture_read(self, &shifted);
 
       /* Domain domain = palette ? Domain_Unscaled : fbatlas_find_suitable_domain(self, shifted); */
       fbatlas_sync_domain(self, domain, &shifted);
-
-      if (domain == Domain_Scaled && jf_diag_scaled_reads <= 128)
-      {
-         jf_diag_atlas_snapshot(self, &shifted, after_ownership,
-               &after_rendered, &after_flags);
-         log_cb(RETRO_LOG_INFO,
-               "[JFVK read] f=%llu n=%u src=%u,%u,%u,%u own=%u/%u/%u/%u->%u/%u/%u/%u rendered=%u->%u flags=%04x->%04x\n",
-               (unsigned long long)jf_diag_frame, jf_diag_scaled_reads,
-               shifted.x, shifted.y, shifted.width, shifted.height,
-               before_ownership[0], before_ownership[1],
-               before_ownership[2], before_ownership[3],
-               after_ownership[0], after_ownership[1],
-               after_ownership[2], after_ownership[3],
-               before_rendered, after_rendered,
-               before_flags, after_flags);
-      }
 
       { TTRect palette_rect = { self->renderpass.palette_offset_x, self->renderpass.palette_offset_y,
          self->renderpass.texture_mode == TextureMode_Palette8bpp ? 256u : 16u, 1 };
@@ -18906,18 +18845,6 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
 
       { unsigned y; for (y = ybegin; y <= yend; y++)
          { unsigned x; for (x = xbegin; x <= xend; x++) bits |= 1u << ((*fbatlas_info(self, x, y)) & STATUS_OWNERSHIP_MASK); } }
-
-      if (domain == Domain_Scaled)
-      {
-         jf_diag_scaled_syncs++;
-         if (jf_diag_scaled_syncs <= 128)
-            log_cb(RETRO_LOG_INFO,
-                  "[JFVK sync] f=%llu n=%u rect=%u,%u,%u,%u ownership_bits=%x dirty=%u\n",
-                  (unsigned long long)jf_diag_frame,
-                  jf_diag_scaled_syncs, rect->x, rect->y,
-                  rect->width, rect->height, bits,
-                  (bits & dirty_bits) != 0);
-      }
 
       write_domains = 0;
 
@@ -20091,13 +20018,6 @@ void rhi_vulkan_prepare_frame(void)
       return;
    }
 
-   jf_diag_frame++;
-   jf_diag_scaled_primitives = 0;
-   jf_diag_scaled_reads = 0;
-   jf_diag_scaled_syncs = 0;
-   jf_diag_scaled_resolves = 0;
-   jf_diag_logged_primitives = 0;
-
    inside_frame = true;
    device_flush_frame_nolock(device);
    vulkan->wait_sync_index(vulkan->handle);
@@ -20142,14 +20062,6 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
     * context normally. */
    if (!inside_frame)
       return;
-
-   if (jf_diag_scaled_primitives || jf_diag_scaled_reads ||
-       jf_diag_scaled_syncs || jf_diag_scaled_resolves)
-      log_cb(RETRO_LOG_INFO,
-            "[JFVK frame] f=%llu primitives=%u reads=%u syncs=%u scaled_resolves=%u\n",
-            (unsigned long long)jf_diag_frame,
-            jf_diag_scaled_primitives, jf_diag_scaled_reads,
-            jf_diag_scaled_syncs, jf_diag_scaled_resolves);
 
    tt_frame_advance();
 
