@@ -440,6 +440,8 @@ static uint32_t IRQAddr;
 static uint32_t RWAddr;
 
 static uint16_t SPUControl;
+static int32_t spu_diag_control_timestamp;
+static int32_t spu_diag_rwaddr_timestamp;
 
 extern bool psx_spu_silent_voice_opt;
 
@@ -1655,6 +1657,16 @@ uint32_t SPU_DiagGetRWAddr(void)
    return RWAddr;
 }
 
+int32_t SPU_DiagGetControlTimestamp(void)
+{
+   return spu_diag_control_timestamp;
+}
+
+int32_t SPU_DiagGetRWAddrTimestamp(void)
+{
+   return spu_diag_rwaddr_timestamp;
+}
+
 /*
  * External API for the SPU module. The public functions
  * (SPU_Power / SPU_Write / SPU_Read / etc.) are defined directly
@@ -1835,6 +1847,7 @@ void SPU_Init(void)
 
          case 0x26:
                     RWAddr = (V << 2) & 0x3FFFF;	      
+                    spu_diag_rwaddr_timestamp = timestamp;
                     SPU_CheckIRQAddr(RWAddr);
                     break;
 
@@ -1846,6 +1859,7 @@ void SPU_Init(void)
          case 0x2A: 
 
                     SPUControl = V;
+                    spu_diag_control_timestamp = timestamp;
                     if(!(V & 0x40))
                     {
                        IRQAsserted = false;

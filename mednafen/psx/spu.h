@@ -101,6 +101,8 @@ uint32_t SPU_ReadDMA(void);
 uint16_t SPU_DiagGetControl(void);
 uint16_t SPU_DiagGetStatus(void);
 uint32_t SPU_DiagGetRWAddr(void);
+int32_t  SPU_DiagGetControlTimestamp(void);
+int32_t  SPU_DiagGetRWAddrTimestamp(void);
 
 int32_t  SPU_UpdateFromCDC(int32_t clocks);
 
