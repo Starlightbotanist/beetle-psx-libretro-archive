@@ -162,7 +162,7 @@ static unsigned cpu_diag_printf_history_pos;
 static unsigned cpu_diag_printf_history_count;
 static bool cpu_diag_assert_dumped;
 
-#define CPU_DIAG_TABLE_WRITE_HISTORY_SIZE 512
+#define CPU_DIAG_TABLE_WRITE_HISTORY_SIZE 128
 typedef struct
 {
    uint32_t pc;
@@ -184,7 +184,7 @@ static INLINE void CPU_DiagRecordTableWrite(uint32_t pc, uint32_t instr,
    CPU_DiagTableWrite *entry;
    uint32_t phys_address = address & 0x1FFFFFFF;
 
-   if(phys_address < 0x000E6508 || phys_address >= 0x000E6634)
+   if(phys_address < 0x000E6544 || phys_address >= 0x000E6558)
       return;
 
    entry = &cpu_diag_table_write_history[cpu_diag_table_write_history_pos];
@@ -2913,7 +2913,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
 	uint32_t address = GPR[rs] + immediate;
 
-	if(MDFN_UNLIKELY(((address & 0x1FFFFFFF) - 0x000E6508) < 0x12C))
+	if(MDFN_UNLIKELY(((address & 0x1FFFFFFF) - 0x000E6544) < 0x14))
 	 CPU_DiagRecordTableWrite(PC, instr, address, GPR[rt], 1);
 	WriteMemory_u8(&timestamp, address, GPR[rt]);
 
@@ -2936,7 +2936,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
         uint32_t address = GPR[rs] + immediate;
 
-	if(MDFN_UNLIKELY(((address & 0x1FFFFFFF) - 0x000E6508) < 0x12C))
+	if(MDFN_UNLIKELY(((address & 0x1FFFFFFF) - 0x000E6544) < 0x14))
 	 CPU_DiagRecordTableWrite(PC, instr, address, GPR[rt], 2);
 	if(MDFN_UNLIKELY(address & 0x1))
 	{
@@ -2965,7 +2965,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
         uint32_t address = GPR[rs] + immediate;
 
-	if(MDFN_UNLIKELY(((address & 0x1FFFFFFF) - 0x000E6508) < 0x12C))
+	if(MDFN_UNLIKELY(((address & 0x1FFFFFFF) - 0x000E6544) < 0x14))
 	 CPU_DiagRecordTableWrite(PC, instr, address, GPR[rt], 4);
 	if(MDFN_UNLIKELY(address & 0x3))
 	{
@@ -3041,7 +3041,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
         uint32_t address = GPR[rs] + immediate;
 
-	if(MDFN_UNLIKELY(((address & 0x1FFFFFFF) - 0x000E6508) < 0x12C))
+	if(MDFN_UNLIKELY(((address & 0x1FFFFFFF) - 0x000E6544) < 0x14))
 	 CPU_DiagRecordTableWrite(PC, instr, address, GPR[rt], 0);
 	switch(address & 0x3)
 	{
@@ -3122,7 +3122,7 @@ static int32_t CPU_RunReal(PS_CPU *self, int32_t timestamp_in)
 
         uint32_t address = GPR[rs] + immediate;
 
-	if(MDFN_UNLIKELY(((address & 0x1FFFFFFF) - 0x000E6508) < 0x12C))
+	if(MDFN_UNLIKELY(((address & 0x1FFFFFFF) - 0x000E6544) < 0x14))
 	 CPU_DiagRecordTableWrite(PC, instr, address, GPR[rt], 0);
 	switch(address & 0x3)
 	{
