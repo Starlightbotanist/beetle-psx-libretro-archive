@@ -218,6 +218,11 @@ void DMA_Power(void)
 {
    lastts = 0;
 
+   dma_diag_target_write_history_pos = 0;
+   dma_diag_target_write_history_count = 0;
+   dma_diag_spu_block_history_pos = 0;
+   dma_diag_spu_block_history_count = 0;
+
    memset(DMACH, 0, sizeof(DMACH));
 
    DMACycleCounter = EventCycles;
