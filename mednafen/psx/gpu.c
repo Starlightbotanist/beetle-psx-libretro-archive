@@ -115,6 +115,23 @@ static const int8_t dither_table[4][4] =
 };
 
 static FastFIFO GPU_BlitterFIFO; /* 0x10 on an actual PS1 GPU, 0x20 here (see comment at top of gpu.h) */
+static uint64_t gpu_diag_cpu_gp0_writes;
+static uint64_t gpu_diag_cpu_gp0_accepted;
+static uint64_t gpu_diag_cpu_gp1_writes;
+static uint64_t gpu_diag_cpu_status_reads;
+static uint64_t gpu_diag_cpu_data_reads;
+static int32_t gpu_diag_last_gp0_timestamp;
+static uint32_t gpu_diag_last_gp0_addr;
+static uint32_t gpu_diag_last_gp0_raw_value;
+static uint32_t gpu_diag_last_gp0_value;
+static uint32_t gpu_diag_last_gp0_accepted;
+static uint32_t gpu_diag_last_gp0_in_cmd;
+static uint32_t gpu_diag_last_gp0_fifo_before;
+static uint32_t gpu_diag_last_gp0_fifo_after;
+static uint32_t gpu_diag_last_gp0_x_before;
+static uint32_t gpu_diag_last_gp0_y_before;
+static uint32_t gpu_diag_last_gp0_x_after;
+static uint32_t gpu_diag_last_gp0_y_after;
 
 struct CTEntry
 {
@@ -1570,12 +1587,12 @@ static void ProcessFIFO(uint32_t in_count)
    }
 }
 
-static INLINE void GPU_WriteCB(uint32_t InData, uint32_t addr)
+static INLINE bool GPU_WriteCB(uint32_t InData, uint32_t addr)
 {
    if(GPU_BlitterFIFO.in_count >= 0x10
       && (GPU.InCmd != INCMD_NONE || 
       (GPU_BlitterFIFO.in_count - 0x10) >= Commands[FastFIFO_Peek(&GPU_BlitterFIFO) >> 24].fifo_fb_len))
-      return;
+      return false;
 
    if(PGXP_enabled())
       PGXP_WriteFIFO(ReadMem(addr), GPU_BlitterFIFO.write_pos);
@@ -1583,15 +1600,22 @@ static INLINE void GPU_WriteCB(uint32_t InData, uint32_t addr)
 
    if(GPU_BlitterFIFO.in_count && GPU.InCmd != INCMD_FBREAD)
       ProcessFIFO(GPU_BlitterFIFO.in_count);
+
+   return true;
 }
 
 void GPU_Write(const int32_t timestamp, uint32_t A, uint32_t V)
 {
+   uint32_t raw_a = A;
+   uint32_t raw_v = V;
+
    V <<= (A & 3) * 8;
 
    if(A & 4)   /* GP1 ("Control") */
    {
       uint32_t command = V >> 24;
+
+      gpu_diag_cpu_gp1_writes++;
 
       V &= 0x00FFFFFF;
 
@@ -1708,7 +1732,23 @@ void GPU_Write(const int32_t timestamp, uint32_t A, uint32_t V)
    }
    else     /* GP0 ("Data") */
    {
-      GPU_WriteCB(V, A);
+      bool accepted;
+
+      gpu_diag_cpu_gp0_writes++;
+      gpu_diag_last_gp0_timestamp = timestamp;
+      gpu_diag_last_gp0_addr = raw_a;
+      gpu_diag_last_gp0_raw_value = raw_v;
+      gpu_diag_last_gp0_value = V;
+      gpu_diag_last_gp0_in_cmd = GPU.InCmd;
+      gpu_diag_last_gp0_fifo_before = GPU_BlitterFIFO.in_count;
+      gpu_diag_last_gp0_x_before = GPU.FBRW_CurX;
+      gpu_diag_last_gp0_y_before = GPU.FBRW_CurY;
+      accepted = GPU_WriteCB(V, A);
+      gpu_diag_last_gp0_accepted = accepted;
+      gpu_diag_last_gp0_fifo_after = GPU_BlitterFIFO.in_count;
+      gpu_diag_cpu_gp0_accepted += accepted;
+      gpu_diag_last_gp0_x_after = GPU.FBRW_CurX;
+      gpu_diag_last_gp0_y_after = GPU.FBRW_CurY;
    }
 }
 
@@ -1760,6 +1800,7 @@ uint32_t GPU_Read(const int32_t timestamp, uint32_t A)
 
    if(A & 4)   /* Status */
    {
+      gpu_diag_cpu_status_reads++;
       ret = (((GPU.DisplayMode << 1) & 0x7F) | ((GPU.DisplayMode >> 6) & 1)) << 16;
 
       ret |= (GPU.DisplayMode & 0x80) << 7;
@@ -1807,6 +1848,7 @@ uint32_t GPU_Read(const int32_t timestamp, uint32_t A)
    }
    else     /* "Data" */
    {
+      gpu_diag_cpu_data_reads++;
       if(GPU.InCmd == INCMD_FBREAD)
          ret = GPU_ReadData();
       else
@@ -2930,6 +2972,29 @@ void GPU_GetDMADiagnosticState(GPUDMADiagnosticState *state)
    state->head_command = state->fifo_count ? FastFIFO_Peek(&GPU_BlitterFIFO) >> 24 : 0xFF;
    state->required_words = state->fifo_count ? Commands[state->head_command].fifo_fb_len : 0;
    state->draw_time_avail = GPU.DrawTimeAvail;
+   state->fb_x = GPU.FBRW_X;
+   state->fb_y = GPU.FBRW_Y;
+   state->fb_width = GPU.FBRW_W;
+   state->fb_height = GPU.FBRW_H;
+   state->fb_cur_x = GPU.FBRW_CurX;
+   state->fb_cur_y = GPU.FBRW_CurY;
+   state->cpu_gp0_writes = gpu_diag_cpu_gp0_writes;
+   state->cpu_gp0_accepted = gpu_diag_cpu_gp0_accepted;
+   state->cpu_gp1_writes = gpu_diag_cpu_gp1_writes;
+   state->cpu_status_reads = gpu_diag_cpu_status_reads;
+   state->cpu_data_reads = gpu_diag_cpu_data_reads;
+   state->last_gp0_timestamp = gpu_diag_last_gp0_timestamp;
+   state->last_gp0_addr = gpu_diag_last_gp0_addr;
+   state->last_gp0_raw_value = gpu_diag_last_gp0_raw_value;
+   state->last_gp0_value = gpu_diag_last_gp0_value;
+   state->last_gp0_accepted = gpu_diag_last_gp0_accepted;
+   state->last_gp0_in_cmd = gpu_diag_last_gp0_in_cmd;
+   state->last_gp0_fifo_before = gpu_diag_last_gp0_fifo_before;
+   state->last_gp0_fifo_after = gpu_diag_last_gp0_fifo_after;
+   state->last_gp0_x_before = gpu_diag_last_gp0_x_before;
+   state->last_gp0_y_before = gpu_diag_last_gp0_y_before;
+   state->last_gp0_x_after = gpu_diag_last_gp0_x_after;
+   state->last_gp0_y_after = gpu_diag_last_gp0_y_after;
 }
 
 uint16_t *GPU_get_vram(void)
