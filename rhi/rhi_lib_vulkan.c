@@ -80,6 +80,13 @@ extern int   psx_color_format;
  * under it because it is the one directory the core already writes to. */
 extern char  retro_save_directory[4096];
 
+static uint64_t jf_diag_frame;
+static unsigned jf_diag_scaled_primitives;
+static unsigned jf_diag_scaled_reads;
+static unsigned jf_diag_scaled_syncs;
+static unsigned jf_diag_scaled_resolves;
+static unsigned jf_diag_logged_primitives;
+
 /* VOLK_GENERATE_PROTOTYPES_H */
 #if defined(VK_VERSION_1_0)
 extern PFN_vkAllocateCommandBuffers vkAllocateCommandBuffers;
@@ -5222,6 +5229,29 @@ static StatusFlags *fbatlas_info(FBAtlas *self,
       return &self->fb_info[NUM_BLOCKS_X * block_y + block_x];
    }
 
+static void jf_diag_atlas_snapshot(FBAtlas *self, const TTRect *rect,
+      unsigned ownership[4], unsigned *rendered, unsigned *flags)
+{
+   unsigned xbegin = rect->x / BLOCK_WIDTH;
+   unsigned xend = (rect->x + rect->width - 1) / BLOCK_WIDTH;
+   unsigned ybegin = rect->y / BLOCK_HEIGHT;
+   unsigned yend = (rect->y + rect->height - 1) / BLOCK_HEIGHT;
+   unsigned x, y;
+
+   ownership[0] = ownership[1] = ownership[2] = ownership[3] = 0;
+   *rendered = 0;
+   *flags = 0;
+   for (y = ybegin; y <= yend; y++)
+      for (x = xbegin; x <= xend; x++)
+      {
+         StatusFlags status = *fbatlas_info(self, x, y);
+         ownership[status & STATUS_OWNERSHIP_MASK]++;
+         if (status & STATUS_TEXTURE_RENDERED)
+            (*rendered)++;
+         *flags |= status;
+      }
+}
+
    static void fbatlas_init(FBAtlas *a)
    {
       unsigned i;
@@ -8827,6 +8857,7 @@ static void renderer_resolve(Renderer *self,
 {
    if (target_domain == Domain_Scaled)
       {
+         jf_diag_scaled_resolves++;
          VkRect2D _vpush = { { (int)(x), (int)(y) }, { BLOCK_WIDTH, BLOCK_HEIGHT } };
          Rect2DVec_push(&self->queue.scaled_resolves, &_vpush);
       }
@@ -9059,7 +9090,37 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    }
    offset_uv = self->scaled_uv_offset && self->render_state.primitive_type == PrimitiveType_Polygon;
 
-   scaled_read = false;
+   if (scaled_read)
+   {
+      unsigned i;
+      jf_diag_scaled_primitives++;
+      if (jf_diag_logged_primitives < 64)
+      {
+         log_cb(RETRO_LOG_INFO,
+               "[JFVK prim] f=%llu n=%u dst=%u,%u,%u,%u tex=%u,%u,%u,%u mode=%u uv=%u,%u-%u,%u tw=%u,%u,%u,%u\n",
+               (unsigned long long)jf_diag_frame, jf_diag_scaled_primitives,
+               rect.x, rect.y, rect.width, rect.height,
+               hd_texture_vram.x, hd_texture_vram.y,
+               hd_texture_vram.width, hd_texture_vram.height,
+               (unsigned)self->render_state.texture_mode,
+               self->render_state.UVLimits.min_u,
+               self->render_state.UVLimits.min_v,
+               self->render_state.UVLimits.max_u,
+               self->render_state.UVLimits.max_v,
+               self->render_state.texture_window.mask_x,
+               self->render_state.texture_window.mask_y,
+               self->render_state.texture_window.or_x,
+               self->render_state.texture_window.or_y);
+         for (i = 0; i < count; i++)
+            log_cb(RETRO_LOG_INFO,
+                  "[JFVK vert] f=%llu n=%u i=%u xyw=%.3f,%.3f,%.6f uv=%u,%u\n",
+                  (unsigned long long)jf_diag_frame,
+                  jf_diag_scaled_primitives, i,
+                  vertices[i].x, vertices[i].y, vertices[i].w,
+                  vertices[i].u, vertices[i].v);
+         jf_diag_logged_primitives++;
+      }
+   }
    z = renderer_allocate_depth(self, scaled_read ? Domain_Scaled : Domain_Unscaled, &rect);
    vram_prov_op(self, (int)rect.x, (int)rect.y,
          (int)rect.width, (int)rect.height, 1);
@@ -18568,6 +18629,9 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
    {
       TTRect shifted = self->renderpass.texture_window;
       bool palette;
+      unsigned before_ownership[4], after_ownership[4];
+      unsigned before_rendered, after_rendered;
+      unsigned before_flags, after_flags;
       switch (self->renderpass.texture_mode)
       {
          case TextureMode_Palette4bpp:
@@ -18582,8 +18646,32 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       shifted.x += self->renderpass.texture_offset_x;
       shifted.y += self->renderpass.texture_offset_y;
 
+      if (domain == Domain_Scaled)
+      {
+         jf_diag_scaled_reads++;
+         if (jf_diag_scaled_reads <= 128)
+            jf_diag_atlas_snapshot(self, &shifted, before_ownership,
+                  &before_rendered, &before_flags);
+      }
+
       /* Domain domain = palette ? Domain_Unscaled : fbatlas_find_suitable_domain(self, shifted); */
       fbatlas_sync_domain(self, domain, &shifted);
+
+      if (domain == Domain_Scaled && jf_diag_scaled_reads <= 128)
+      {
+         jf_diag_atlas_snapshot(self, &shifted, after_ownership,
+               &after_rendered, &after_flags);
+         log_cb(RETRO_LOG_INFO,
+               "[JFVK read] f=%llu n=%u src=%u,%u,%u,%u own=%u/%u/%u/%u->%u/%u/%u/%u rendered=%u->%u flags=%04x->%04x\n",
+               (unsigned long long)jf_diag_frame, jf_diag_scaled_reads,
+               shifted.x, shifted.y, shifted.width, shifted.height,
+               before_ownership[0], before_ownership[1],
+               before_ownership[2], before_ownership[3],
+               after_ownership[0], after_ownership[1],
+               after_ownership[2], after_ownership[3],
+               before_rendered, after_rendered,
+               before_flags, after_flags);
+      }
 
       { TTRect palette_rect = { self->renderpass.palette_offset_x, self->renderpass.palette_offset_y,
          self->renderpass.texture_mode == TextureMode_Palette8bpp ? 256u : 16u, 1 };
@@ -18757,6 +18845,18 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
 
       { unsigned y; for (y = ybegin; y <= yend; y++)
          { unsigned x; for (x = xbegin; x <= xend; x++) bits |= 1u << ((*fbatlas_info(self, x, y)) & STATUS_OWNERSHIP_MASK); } }
+
+      if (domain == Domain_Scaled)
+      {
+         jf_diag_scaled_syncs++;
+         if (jf_diag_scaled_syncs <= 128)
+            log_cb(RETRO_LOG_INFO,
+                  "[JFVK sync] f=%llu n=%u rect=%u,%u,%u,%u ownership_bits=%x dirty=%u\n",
+                  (unsigned long long)jf_diag_frame,
+                  jf_diag_scaled_syncs, rect->x, rect->y,
+                  rect->width, rect->height, bits,
+                  (bits & dirty_bits) != 0);
+      }
 
       write_domains = 0;
 
@@ -19930,6 +20030,13 @@ void rhi_vulkan_prepare_frame(void)
       return;
    }
 
+   jf_diag_frame++;
+   jf_diag_scaled_primitives = 0;
+   jf_diag_scaled_reads = 0;
+   jf_diag_scaled_syncs = 0;
+   jf_diag_scaled_resolves = 0;
+   jf_diag_logged_primitives = 0;
+
    inside_frame = true;
    device_flush_frame_nolock(device);
    vulkan->wait_sync_index(vulkan->handle);
@@ -19974,6 +20081,14 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
     * context normally. */
    if (!inside_frame)
       return;
+
+   if (jf_diag_scaled_primitives || jf_diag_scaled_reads ||
+       jf_diag_scaled_syncs || jf_diag_scaled_resolves)
+      log_cb(RETRO_LOG_INFO,
+            "[JFVK frame] f=%llu primitives=%u reads=%u syncs=%u scaled_resolves=%u\n",
+            (unsigned long long)jf_diag_frame,
+            jf_diag_scaled_primitives, jf_diag_scaled_reads,
+            jf_diag_scaled_syncs, jf_diag_scaled_resolves);
 
    tt_frame_advance();
 
