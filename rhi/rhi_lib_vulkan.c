@@ -5818,6 +5818,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
          FilterExclude polygon_2d_filter_exclude;
          ImageHandle scaled_framebuffer;
          ImageHandle scaled_framebuffer_msaa;
+         ImageHandle scaled_read_snapshot;
          ImageHandle bias_framebuffer;
          ImageHandle framebuffer;
          ImageHandle framebuffer_ssaa;
@@ -6705,6 +6706,11 @@ static void renderer_init(Renderer *self,
          imageview_vec_push(&self->scaled_views, device_create_image_view(self->device, &view_info));
       } }
    }
+
+   info.levels = 1;
+   info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+   ih_move(&self->scaled_read_snapshot, device_create_image(self->device, &info, NULL));
+   image_set_layout(ih_get(&self->scaled_read_snapshot), Layout_General);
 
    /* Check for support. */
    if (self->msaa > 1)
@@ -9545,10 +9551,64 @@ static const ClearCandidate * renderer_find_clear_candidate(Renderer *self,
    return ret;
 }
 
+static bool renderer_queue_has_scaled_read(const Renderer *self)
+{
+   unsigned i;
+   for (i = 0; i < PrimitiveInfoVec_size((PrimitiveInfoVec *)&self->queue.opaque_textured_scissor); i++)
+      if (PrimitiveInfoVec_at((PrimitiveInfoVec *)&self->queue.opaque_textured_scissor, i)->scaled_read)
+         return true;
+   for (i = 0; i < PrimitiveInfoVec_size((PrimitiveInfoVec *)&self->queue.semi_transparent_opaque_scissor); i++)
+      if (PrimitiveInfoVec_at((PrimitiveInfoVec *)&self->queue.semi_transparent_opaque_scissor, i)->scaled_read)
+         return true;
+   for (i = 0; i < SemiTransparentStateVec_size((SemiTransparentStateVec *)&self->queue.semi_transparent_state); i++)
+      if (SemiTransparentStateVec_at((SemiTransparentStateVec *)&self->queue.semi_transparent_state, i)->scaled_read)
+         return true;
+   return false;
+}
+
 static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
 {
    RenderPassInfo_Subpass subpass;
    renderer_ensure_command_buffer(self);
+
+   if (self->msaa == 1 && renderer_queue_has_scaled_read(self))
+   {
+      VkOffset3D origin = { 0, 0, 0 };
+      VkOffset3D extent = {
+         (int32_t)(FB_WIDTH * self->scaling),
+         (int32_t)(FB_HEIGHT * self->scaling), 1
+      };
+
+      renderer_flush_blits(self);
+      renderer_flush_resolves(self);
+      commandbuffer_image_barrier(cbh_get(&self->cmd),
+            ih_get(&self->scaled_framebuffer),
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+      commandbuffer_image_barrier(cbh_get(&self->cmd),
+            ih_get(&self->scaled_read_snapshot),
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+      commandbuffer_blit_image(cbh_get(&self->cmd),
+            ih_get(&self->scaled_read_snapshot),
+            ih_get(&self->scaled_framebuffer),
+            &origin, &extent, &origin, &extent,
+            0, 0, 0, 0, 1, VK_FILTER_NEAREST);
+      commandbuffer_image_barrier(cbh_get(&self->cmd),
+            ih_get(&self->scaled_read_snapshot),
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+      commandbuffer_image_barrier(cbh_get(&self->cmd),
+            ih_get(&self->scaled_framebuffer),
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+   }
 
    { RenderPassInfo info;
    render_pass_info_defaults(&info);
@@ -9645,7 +9705,7 @@ static void renderer_dispatch_set_scaled_read_texture(Renderer *self,
       if (self->msaa > 1)
          commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->scaled_framebuffer_msaa)), StockSampler_NearestClamp);
       else
-         commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, iv_get(imageview_vec_at(&self->scaled_views, 0)), StockSampler_NearestClamp);
+         commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->scaled_read_snapshot)), StockSampler_NearestClamp);
    }
    else
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer)), StockSampler_NearestClamp);
@@ -10454,6 +10514,7 @@ static void renderer_fini(Renderer *self)
     * teardown, which a plain struct no longer provides). */
    ih_reset(&self->scaled_framebuffer);
    ih_reset(&self->scaled_framebuffer_msaa);
+   ih_reset(&self->scaled_read_snapshot);
    ih_reset(&self->bias_framebuffer);
    ih_reset(&self->framebuffer);
    ih_reset(&self->framebuffer_ssaa);
