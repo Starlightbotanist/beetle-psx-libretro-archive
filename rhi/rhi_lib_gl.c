@@ -11,6 +11,7 @@
 #include <glsym/glsym.h>
 
 #include <boolean.h>
+#include <features/features_cpu.h>
 
 #include "mednafen/mednafen.h"
 #include "mednafen/psx/gpu.h"
@@ -1045,6 +1046,22 @@ struct gl_renderer {
       struct gl_vram_sync_tile tiles
             [GL_VRAM_SYNC_TILES_Y][GL_VRAM_SYNC_TILES_X];
    } vram_sync;
+
+   struct
+   {
+      uint64_t frame;
+      uint64_t native_pixels;
+      uint64_t source_pixels;
+      uint64_t mirror_us;
+      uint64_t finish_us;
+      unsigned primitives;
+      unsigned textured;
+      unsigned dependencies;
+      unsigned draw_flushes;
+      unsigned mirrors;
+      unsigned dependency_mirrors;
+      unsigned max_native_pixels;
+   } vram_sync_diag;
 };
 typedef struct gl_renderer gl_renderer;
 
@@ -2645,6 +2662,8 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
    unsigned i;
    bool framebuffer_feedback = false;
 
+   renderer->vram_sync_diag.primitives++;
+
 #ifdef GL_READ_FRAMEBUFFER
    if (v[0].texture_blend_mode != 0 &&
        gl_caps.fp_glBlitFramebuffer)
@@ -2660,6 +2679,8 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
       bool clut_dirty = false;
       bool texture_gpu_written;
       bool clut_gpu_written = false;
+
+      renderer->vram_sync_diag.textured++;
 
       if (texture_rect.height && !texture_rect.width)
          texture_rect.width = 1;
@@ -2681,10 +2702,14 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
 
       if (texture_dirty || clut_dirty)
       {
+         renderer->vram_sync_diag.dependencies++;
          /* Pending vertices must reach fb_out before their native-resolution
           * representation can be copied into fb_texture. */
          if (!gl_draw_buffer_is_empty(renderer->command_buffer))
+         {
+            renderer->vram_sync_diag.draw_flushes++;
             gl_renderer_draw(renderer);
+         }
 
          if (texture_dirty)
             gl_vram_sync_mirror_rect(renderer,
@@ -6346,6 +6371,38 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
     * every tile current for the start of the next frame. */
    gl_vram_sync_clear(renderer);
 
+   if (renderer->vram_sync_diag.mirrors)
+      log_cb(RETRO_LOG_INFO,
+            "[GL feedback perf] frame=%llu primitives=%u textured=%u "
+            "dependencies=%u draw_flushes=%u mirrors=%u dependency_mirrors=%u "
+            "native_pixels=%llu source_pixels=%llu max_native_pixels=%u "
+            "mirror_us=%llu finish_us=%llu\n",
+            (unsigned long long)renderer->vram_sync_diag.frame,
+            renderer->vram_sync_diag.primitives,
+            renderer->vram_sync_diag.textured,
+            renderer->vram_sync_diag.dependencies,
+            renderer->vram_sync_diag.draw_flushes,
+            renderer->vram_sync_diag.mirrors,
+            renderer->vram_sync_diag.dependency_mirrors,
+            (unsigned long long)renderer->vram_sync_diag.native_pixels,
+            (unsigned long long)renderer->vram_sync_diag.source_pixels,
+            renderer->vram_sync_diag.max_native_pixels,
+            (unsigned long long)renderer->vram_sync_diag.mirror_us,
+            (unsigned long long)renderer->vram_sync_diag.finish_us);
+
+   renderer->vram_sync_diag.frame++;
+   renderer->vram_sync_diag.native_pixels = 0;
+   renderer->vram_sync_diag.source_pixels = 0;
+   renderer->vram_sync_diag.mirror_us = 0;
+   renderer->vram_sync_diag.finish_us = 0;
+   renderer->vram_sync_diag.primitives = 0;
+   renderer->vram_sync_diag.textured = 0;
+   renderer->vram_sync_diag.dependencies = 0;
+   renderer->vram_sync_diag.draw_flushes = 0;
+   renderer->vram_sync_diag.mirrors = 0;
+   renderer->vram_sync_diag.dependency_mirrors = 0;
+   renderer->vram_sync_diag.max_native_pixels = 0;
+
    cleanup_gl_state();
 
    /* When using a hardware renderer we set the data pointer to
@@ -7773,6 +7830,10 @@ static void gl_mirror_fb_out_to_fb_texture(gl_renderer *renderer,
    GLint     uw;
    GLint     uh;
    uint32_t  upscale;
+   unsigned native_pixels;
+   retro_time_t begin;
+   retro_time_t before_finish;
+   retro_time_t end;
 
    if ((!allow_with_software_fb && has_software_fb) ||
        !gl_caps.fp_glBlitFramebuffer)
@@ -7783,6 +7844,8 @@ static void gl_mirror_fb_out_to_fb_texture(gl_renderer *renderer,
    uy      = (GLint) y * (GLint) upscale;
    uw      = (GLint) w * (GLint) upscale;
    uh      = (GLint) h * (GLint) upscale;
+   native_pixels = (unsigned)w * (unsigned)h;
+   begin = cpu_features_get_time_usec();
 
    scissor_was_enabled = glIsEnabled(GL_SCISSOR_TEST);
 
@@ -7828,10 +7891,25 @@ static void gl_mirror_fb_out_to_fb_texture(gl_renderer *renderer,
          GL_COLOR_BUFFER_BIT,
          GL_NEAREST);
 
+   before_finish = cpu_features_get_time_usec();
    /* Some drivers do not make dependency-driven framebuffer mirrors visible
     * to the following texture fetch without explicit completion. */
    if (allow_with_software_fb)
       glFinish();
+   end = cpu_features_get_time_usec();
+
+   renderer->vram_sync_diag.mirrors++;
+   renderer->vram_sync_diag.native_pixels += native_pixels;
+   renderer->vram_sync_diag.source_pixels +=
+         (uint64_t)native_pixels * upscale * upscale;
+   renderer->vram_sync_diag.mirror_us += end - begin;
+   if (allow_with_software_fb)
+   {
+      renderer->vram_sync_diag.dependency_mirrors++;
+      renderer->vram_sync_diag.finish_us += end - before_finish;
+   }
+   if (native_pixels > renderer->vram_sync_diag.max_native_pixels)
+      renderer->vram_sync_diag.max_native_pixels = native_pixels;
 
    if (scissor_was_enabled)
       glEnable(GL_SCISSOR_TEST);
