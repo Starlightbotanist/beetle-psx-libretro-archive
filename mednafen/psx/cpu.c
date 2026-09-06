@@ -106,6 +106,14 @@ enum
 static PS_CPU            s_cpu;
 PS_CPU                  *PSX_CPU = &s_cpu;
 static unsigned          cpu_diag_exceptions;
+static bool              cpu_diag_armed;
+
+void CPU_DiagArm(void)
+{
+   cpu_diag_exceptions = 0;
+   cpu_diag_armed = true;
+   log_cb(RETRO_LOG_INFO, "[CPUDIAG] armed\n");
+}
 
 /* Interpreter dispatch replication (computed-goto builds only): each
  * opcode handler ends with its own fetch/decode/indirect-jump instead
@@ -841,7 +849,7 @@ static uint32_t NO_INLINE CPU_Exception(uint32_t code, uint32_t PC, const uint32
 
    assert(code < 16);
 
-   if(cpu_diag_exceptions < 256 &&
+   if(cpu_diag_armed && cpu_diag_exceptions < 256 &&
          (code != EXCEPTION_INT || PC < 0x80000000 || PC >= 0xBFC00000))
    {
       log_cb(RETRO_LOG_INFO,

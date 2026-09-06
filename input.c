@@ -10,6 +10,7 @@
 #include "libretro_game_database.h"
 
 extern retro_log_printf_t log_cb;
+extern void CPU_DiagArm(void);
 
 /* ------------------------------------------------------------------------------ */
 /*  Locals */
@@ -935,6 +936,8 @@ void input_update(bool libretro_supports_bitmasks, retro_input_state_t input_sta
             log_cb(RETRO_LOG_INFO,
                   "[CDDIAG] input seq=%llu down=%d buttons=%04x\n",
                   diag_input_seq++, down, p_input->buttons);
+            if(down)
+               CPU_DiagArm();
             diag_down = down;
          }
       }
