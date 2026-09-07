@@ -7416,6 +7416,43 @@ static void renderer_ssaa_framebuffer(Renderer *self)
          resolves_ssaa[resolves_n++] = r;
       } } }
 
+   {
+      static unsigned last_x = ~0u, last_y, last_w, last_h;
+      static unsigned last_scale, last_msaa, log_count;
+      bool old_bound_sufficient = true;
+      unsigned i;
+
+      for (i = 0; i < resolves_n; i++)
+      {
+         const VkRect2D *r = &resolves_ssaa[i];
+         if (((unsigned)r->offset.x + r->extent.width) * self->scaling > FB_WIDTH ||
+             ((unsigned)r->offset.y + r->extent.height) * self->scaling > FB_HEIGHT)
+         {
+            old_bound_sufficient = false;
+            break;
+         }
+      }
+
+      if (log_count < 120 &&
+          (last_x != rect->x || last_y != rect->y ||
+           last_w != rect->width || last_h != rect->height ||
+           last_scale != self->scaling || last_msaa != self->msaa))
+      {
+         LOGI("[SSAA_BOUNDS] rect=%u,%u %ux%u scale=%u msaa=%u blocks=%u old_bound_sufficient=%u\n",
+               (unsigned)rect->x, (unsigned)rect->y,
+               (unsigned)rect->width, (unsigned)rect->height,
+               self->scaling, self->msaa, resolves_n,
+               old_bound_sufficient ? 1u : 0u);
+         last_x = rect->x;
+         last_y = rect->y;
+         last_w = rect->width;
+         last_h = rect->height;
+         last_scale = self->scaling;
+         last_msaa = self->msaa;
+         log_count++;
+      }
+   }
+
    renderer_ensure_command_buffer(self);
 
    commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Samples, self->msaa);
