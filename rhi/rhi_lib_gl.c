@@ -8000,6 +8000,8 @@ static void gl_copy_fb_out_to_feedback(gl_renderer *renderer,
 {
    unsigned scale = renderer->internal_upscaling;
 
+   return;
+
    if (gl_caps.fp_glCopyImageSubData)
       gl_caps.fp_glCopyImageSubData(
             renderer->fb_out.id, GL_TEXTURE_2D, 0,
