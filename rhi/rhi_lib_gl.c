@@ -1070,6 +1070,9 @@ struct gl_renderer {
       uint64_t snapshot_calls;
       uint64_t snapshot_blits;
       uint64_t snapshot_pixels;
+      uint64_t producer_snapshots;
+      uint64_t texture_snapshots;
+      uint64_t clut_snapshots;
    } scaled_diag;
 };
 typedef struct gl_renderer gl_renderer;
@@ -2865,9 +2868,12 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
          if (texture_dirty)
          {
             if (scaled_feedback)
+            {
+               renderer->scaled_diag.producer_snapshots++;
                gl_snapshot_fb_out(renderer,
                      producer_rect.x, producer_rect.y,
                      producer_rect.width, producer_rect.height);
+            }
             if (!scaled_feedback || renderer->texture_tracking_enabled)
                gl_vram_sync_mirror_rect(renderer,
                      producer_rect.x, producer_rect.y,
@@ -2887,13 +2893,19 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
          if (gl_vram_sync_rect_has_mask(renderer,
                texture_rect.x, texture_rect.y,
                texture_rect.width, texture_rect.height, true))
+         {
+            renderer->scaled_diag.texture_snapshots++;
             gl_snapshot_fb_out(renderer, texture_rect.x, texture_rect.y,
                   texture_rect.width, texture_rect.height);
+         }
          if ((depth == 1 || depth == 2) &&
              gl_vram_sync_rect_has_mask(renderer,
                   v[0].clut[0], v[0].clut[1], clut_width, 1, true))
+         {
+            renderer->scaled_diag.clut_snapshots++;
             gl_snapshot_fb_out(renderer,
                   v[0].clut[0], v[0].clut[1], clut_width, 1);
+         }
 
          if (!renderer->texture_tracking_enabled)
          {
@@ -6612,7 +6624,7 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
       log_cb(RETRO_LOG_INFO,
             "[GL scaled feedback] frames=120 feedback=%llu dependencies=%llu "
             "flushes=%llu queries=%llu tiles=%llu snapshots=%llu blits=%llu "
-            "pixels=%llu\n",
+            "pixels=%llu producer=%llu texture=%llu clut=%llu\n",
             (unsigned long long)renderer->scaled_diag.feedback_primitives,
             (unsigned long long)renderer->scaled_diag.dependencies,
             (unsigned long long)renderer->scaled_diag.draw_flushes,
@@ -6620,7 +6632,10 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
             (unsigned long long)renderer->scaled_diag.scaled_tiles,
             (unsigned long long)renderer->scaled_diag.snapshot_calls,
             (unsigned long long)renderer->scaled_diag.snapshot_blits,
-            (unsigned long long)renderer->scaled_diag.snapshot_pixels);
+            (unsigned long long)renderer->scaled_diag.snapshot_pixels,
+            (unsigned long long)renderer->scaled_diag.producer_snapshots,
+            (unsigned long long)renderer->scaled_diag.texture_snapshots,
+            (unsigned long long)renderer->scaled_diag.clut_snapshots);
       renderer->scaled_diag.feedback_primitives = 0;
       renderer->scaled_diag.dependencies = 0;
       renderer->scaled_diag.draw_flushes = 0;
@@ -6629,6 +6644,9 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
       renderer->scaled_diag.snapshot_calls = 0;
       renderer->scaled_diag.snapshot_blits = 0;
       renderer->scaled_diag.snapshot_pixels = 0;
+      renderer->scaled_diag.producer_snapshots = 0;
+      renderer->scaled_diag.texture_snapshots = 0;
+      renderer->scaled_diag.clut_snapshots = 0;
    }
 
    cleanup_gl_state();
@@ -8138,16 +8156,8 @@ static void gl_copy_fb_out_to_feedback(gl_renderer *renderer,
 {
    unsigned scale = renderer->internal_upscaling;
 
-   if (gl_caps.fp_glCopyImageSubData)
-      gl_caps.fp_glCopyImageSubData(
-            renderer->fb_out.id, GL_TEXTURE_2D, 0,
-            x * scale, y * scale, 0,
-            renderer->fb_feedback_texture.id, GL_TEXTURE_2D, 0,
-            x * scale, y * scale, 0,
-            w * scale, h * scale, 1);
-   else
-      gl_blit_fb_out(renderer, &renderer->fb_feedback_texture,
-            scale, x, y, w, h);
+   gl_blit_fb_out(renderer, &renderer->fb_feedback_texture,
+         scale, x, y, w, h);
 }
 
 static void gl_snapshot_fb_out(gl_renderer *renderer,
