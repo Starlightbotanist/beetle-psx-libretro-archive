@@ -93,6 +93,7 @@ extern PFN_vkCmdBindDescriptorSets vkCmdBindDescriptorSets;
 extern PFN_vkCmdBindPipeline vkCmdBindPipeline;
 extern PFN_vkCmdBindVertexBuffers vkCmdBindVertexBuffers;
 extern PFN_vkCmdBlitImage vkCmdBlitImage;
+extern PFN_vkCmdCopyImage vkCmdCopyImage;
 extern PFN_vkCmdClearColorImage vkCmdClearColorImage;
 extern PFN_vkCmdClearDepthStencilImage vkCmdClearDepthStencilImage;
 extern PFN_vkCmdCopyBuffer vkCmdCopyBuffer;
@@ -248,6 +249,7 @@ static void volkGenLoadDevice(void* context,
    vkCmdBindPipeline = (PFN_vkCmdBindPipeline)load(context, "vkCmdBindPipeline");
    vkCmdBindVertexBuffers = (PFN_vkCmdBindVertexBuffers)load(context, "vkCmdBindVertexBuffers");
    vkCmdBlitImage = (PFN_vkCmdBlitImage)load(context, "vkCmdBlitImage");
+   vkCmdCopyImage = (PFN_vkCmdCopyImage)load(context, "vkCmdCopyImage");
    vkCmdClearColorImage = (PFN_vkCmdClearColorImage)load(context, "vkCmdClearColorImage");
    vkCmdClearDepthStencilImage = (PFN_vkCmdClearDepthStencilImage)load(context, "vkCmdClearDepthStencilImage");
    vkCmdCopyBuffer = (PFN_vkCmdCopyBuffer)load(context, "vkCmdCopyBuffer");
@@ -348,6 +350,7 @@ PFN_vkCmdBindDescriptorSets vkCmdBindDescriptorSets;
 PFN_vkCmdBindPipeline vkCmdBindPipeline;
 PFN_vkCmdBindVertexBuffers vkCmdBindVertexBuffers;
 PFN_vkCmdBlitImage vkCmdBlitImage;
+PFN_vkCmdCopyImage vkCmdCopyImage;
 PFN_vkCmdClearColorImage vkCmdClearColorImage;
 PFN_vkCmdClearDepthStencilImage vkCmdClearDepthStencilImage;
 PFN_vkCmdCopyBuffer vkCmdCopyBuffer;
@@ -4486,6 +4489,14 @@ static void commandbuffer_copy_buffer_whole(struct CommandBuffer *self,
          unsigned row_length,
          unsigned slice_height,
          const VkImageSubresourceLayers *subresrouce);
+   static void commandbuffer_copy_image(struct CommandBuffer *self,
+         const Image *dst,
+         const Image *src,
+         const VkImageCopy *region);
+   static void commandbuffer_resolve_image(struct CommandBuffer *self,
+         const Image *dst,
+         const Image *src,
+         const VkImageResolve *region);
    static void commandbuffer_full_barrier(struct CommandBuffer *self);
    static void commandbuffer_pixel_barrier(struct CommandBuffer *self);
    static void commandbuffer_barrier_simple(struct CommandBuffer *self,
@@ -5639,6 +5650,7 @@ struct OpaqueQueue
 
    Rect2DVec scaled_resolves;
    Rect2DVec unscaled_resolves;
+   Rect2DVec scaled_texture_reads;
    BlitInfoVec scaled_blits;
    BlitInfoVec scaled_masked_blits;
    BlitInfoVec unscaled_blits;
@@ -5665,6 +5677,7 @@ static void opaque_queue_init(struct OpaqueQueue *q)
    OQ_VEC_ZERO(q->semi_transparent_state);
    OQ_VEC_ZERO(q->scaled_resolves);
    OQ_VEC_ZERO(q->unscaled_resolves);
+   OQ_VEC_ZERO(q->scaled_texture_reads);
    OQ_VEC_ZERO(q->scaled_blits);
    OQ_VEC_ZERO(q->scaled_masked_blits);
    OQ_VEC_ZERO(q->unscaled_blits);
@@ -5818,6 +5831,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
          FilterExclude polygon_2d_filter_exclude;
          ImageHandle scaled_framebuffer;
          ImageHandle scaled_framebuffer_msaa;
+         ImageHandle scaled_read_snapshot;
          ImageHandle bias_framebuffer;
          ImageHandle framebuffer;
          ImageHandle framebuffer_ssaa;
@@ -6760,6 +6774,15 @@ static void renderer_init(Renderer *self,
        * lower self->scaling factor to compensate. */
    }
 
+   if (self->msaa == 1)
+   {
+      info.levels = 1;
+      info.samples = VK_SAMPLE_COUNT_1_BIT;
+      info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+      ih_move(&self->scaled_read_snapshot, device_create_image(self->device, &info, NULL));
+      image_set_layout(ih_get(&self->scaled_read_snapshot), Layout_General);
+   }
+
    fbatlas_set_hazard_listener(&self->atlas, self);
    {
       TTGpuBackend vt = vk_tt_make_backend(self);
@@ -6873,7 +6896,7 @@ static void renderer_init_primitive_pipelines(Renderer *self)
 
    if (self->msaa > 1)
    {
-      self->pipelines.textured_scaled = device_request_program_graphics_code(self->device, textured_vert, sizeof(textured_vert), textured_msaa_frag, sizeof(textured_msaa_frag));
+      self->pipelines.textured_scaled = device_request_program_graphics_code(self->device, textured_vert, sizeof(textured_vert), textured_frag, sizeof(textured_frag));
       self->pipelines.textured_unscaled = device_request_program_graphics_code(self->device, textured_vert, sizeof(textured_vert), textured_msaa_unscaled_frag, sizeof(textured_msaa_unscaled_frag));
    }
    else
@@ -6897,7 +6920,7 @@ static void renderer_init_primitive_feedback_pipelines(Renderer *self)
    if (self->msaa > 1)
    {
       self->pipelines.textured_masked_scaled = device_request_program_graphics_code(self->device, textured_vert, sizeof(textured_vert),
-            feedback_msaa_frag, sizeof(feedback_msaa_frag));
+            feedback_frag, sizeof(feedback_frag));
       self->pipelines.textured_masked_unscaled = device_request_program_graphics_code(self->device, textured_vert, sizeof(textured_vert),
             feedback_msaa_unscaled_frag, sizeof(feedback_msaa_unscaled_frag));
       self->pipelines.flat_masked = device_request_program_graphics_code(self->device, flat_vert, sizeof(flat_vert),
@@ -9550,6 +9573,76 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
    RenderPassInfo_Subpass subpass;
    renderer_ensure_command_buffer(self);
 
+   if (!Rect2DVec_empty(&self->queue.scaled_texture_reads))
+   {
+      unsigned i;
+      /* Sample a copy rather than the active color attachment. */
+      Image *scaled = self->msaa > 1 ?
+         ih_get(&self->scaled_framebuffer_msaa) :
+         ih_get(&self->scaled_framebuffer);
+      Image *read = self->msaa > 1 ?
+         ih_get(&self->scaled_framebuffer) :
+         ih_get(&self->scaled_read_snapshot);
+
+      renderer_flush_blits(self);
+      renderer_flush_resolves(self);
+      commandbuffer_image_barrier(cbh_get(&self->cmd),
+            scaled,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+      commandbuffer_image_barrier(cbh_get(&self->cmd),
+            read,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+      for (i = 0; i < Rect2DVec_size(&self->queue.scaled_texture_reads); i++)
+      {
+         const VkRect2D *rect = Rect2DVec_at(&self->queue.scaled_texture_reads, i);
+         VkOffset3D offset = {
+            rect->offset.x * (int32_t)self->scaling,
+            rect->offset.y * (int32_t)self->scaling, 0
+         };
+         VkExtent3D extent = {
+            rect->extent.width * self->scaling,
+            rect->extent.height * self->scaling, 1
+         };
+
+         if (self->msaa > 1)
+         {
+            VkImageResolve resolve = {
+               { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, offset,
+               { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, offset,
+               extent
+            };
+            commandbuffer_resolve_image(cbh_get(&self->cmd),
+                  read, scaled, &resolve);
+         }
+         else
+         {
+            VkImageCopy copy = {
+               { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, offset,
+               { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, offset,
+               extent
+            };
+            commandbuffer_copy_image(cbh_get(&self->cmd),
+                  read, scaled, &copy);
+         }
+      }
+      commandbuffer_image_barrier(cbh_get(&self->cmd),
+            read,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+      commandbuffer_image_barrier(cbh_get(&self->cmd),
+            scaled,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+            VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+   }
+
    { RenderPassInfo info;
    render_pass_info_defaults(&info);
 
@@ -9641,12 +9734,9 @@ static void renderer_dispatch_set_scaled_read_texture(Renderer *self,
       bool textured)
 {
    if (scaled_read)
-   {
-      if (self->msaa > 1)
-         commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->scaled_framebuffer_msaa)), StockSampler_NearestClamp);
-      else
-         commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, iv_get(imageview_vec_at(&self->scaled_views, 0)), StockSampler_NearestClamp);
-   }
+      commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0,
+            self->msaa > 1 ? iv_get(imageview_vec_at(&self->scaled_views, 0)) :
+            image_get_view(ih_get(&self->scaled_read_snapshot)), StockSampler_NearestClamp);
    else
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer)), StockSampler_NearestClamp);
    if (textured)
@@ -10454,6 +10544,7 @@ static void renderer_fini(Renderer *self)
     * teardown, which a plain struct no longer provides). */
    ih_reset(&self->scaled_framebuffer);
    ih_reset(&self->scaled_framebuffer_msaa);
+   ih_reset(&self->scaled_read_snapshot);
    ih_reset(&self->bias_framebuffer);
    ih_reset(&self->framebuffer);
    ih_reset(&self->framebuffer_ssaa);
@@ -10482,6 +10573,7 @@ static void renderer_fini(Renderer *self)
    SemiTransparentStateVec_free_storage(&self->queue.semi_transparent_state);
    Rect2DVec_free_storage(&self->queue.scaled_resolves);
    Rect2DVec_free_storage(&self->queue.unscaled_resolves);
+   Rect2DVec_free_storage(&self->queue.scaled_texture_reads);
    BlitInfoVec_free_storage(&self->queue.scaled_blits);
    BlitInfoVec_free_storage(&self->queue.scaled_masked_blits);
    BlitInfoVec_free_storage(&self->queue.unscaled_blits);
@@ -10514,6 +10606,7 @@ static void renderer_reset_queue(Renderer *self)
    BufferVertexVec_clear(&self->queue.semi_transparent_opaque);
    PrimitiveInfoVec_clear(&self->queue.semi_transparent_opaque_scissor);
    ClearCandidateVec_clear(&self->queue.clear_candidates);
+   Rect2DVec_clear(&self->queue.scaled_texture_reads);
    self->primitive_index = 0;
    self->render_pass_is_feedback = false;
 
@@ -10527,12 +10620,9 @@ static void renderer_reset_queue(Renderer *self)
 static void renderer_semi_transparent_set_state(Renderer *self,
       const SemiTransparentState *state){
    if (state->scaled_read)
-   {
-      if (self->msaa > 1)
-         commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->scaled_framebuffer_msaa)), StockSampler_NearestClamp);
-      else
-         commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, iv_get(imageview_vec_at(&self->scaled_views, 0)), StockSampler_NearestClamp);
-   }
+      commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0,
+            self->msaa > 1 ? iv_get(imageview_vec_at(&self->scaled_views, 0)) :
+            image_get_view(ih_get(&self->scaled_read_snapshot)), StockSampler_NearestClamp);
    else
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer)), StockSampler_NearestClamp);
    renderer_hd_texture_uniforms(self, state->hd_texture_index);
@@ -13855,6 +13945,24 @@ static VkOffset3D cb_add_offset(const VkOffset3D *a, const VkOffset3D *b)
       };
       vkCmdCopyImageToBuffer(self->cmd, image_get_image(image), image_get_layout(image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL),
             buffer_get_buffer(buffer), 1, &region);
+   }
+
+   static void commandbuffer_copy_image(struct CommandBuffer *self,
+         const Image *dst, const Image *src, const VkImageCopy *region)
+   {
+      vkCmdCopyImage(self->cmd,
+            image_get_image(src), image_get_layout(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL),
+            image_get_image(dst), image_get_layout(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL),
+            1, region);
+   }
+
+   static void commandbuffer_resolve_image(struct CommandBuffer *self,
+         const Image *dst, const Image *src, const VkImageResolve *region)
+   {
+      vkCmdResolveImage(self->cmd,
+            image_get_image(src), image_get_layout(src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL),
+            image_get_image(dst), image_get_layout(dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL),
+            1, region);
    }
 
    static void commandbuffer_clear_image(struct CommandBuffer *self,
@@ -18579,6 +18687,64 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       fbatlas_read_domain(self, domain, Stage_Fragment, rect);
    }
 
+static void fbatlas_queue_scaled_texture_read(FBAtlas *self,
+      const TTRect *rect)
+{
+   unsigned x[2], y[2], width[2], height[2];
+   unsigned nx, ny, i, j;
+
+   x[0] = rect->x & (FB_WIDTH - 1);
+   y[0] = rect->y & (FB_HEIGHT - 1);
+   width[0] = min_(rect->width, FB_WIDTH - x[0]);
+   height[0] = min_(rect->height, FB_HEIGHT - y[0]);
+   nx = rect->width > width[0] ? 2 : 1;
+   ny = rect->height > height[0] ? 2 : 1;
+   x[1] = 0;
+   y[1] = 0;
+   width[1] = rect->width - width[0];
+   height[1] = rect->height - height[0];
+
+   for (j = 0; j < ny; j++)
+      for (i = 0; i < nx; i++)
+      {
+         Rect2DVec *reads = &self->listener->queue.scaled_texture_reads;
+         VkRect2D copy = {
+            { (int32_t)x[i], (int32_t)y[j] },
+            { width[i], height[j] }
+         };
+         unsigned k, out = 0;
+
+         for (k = 0; k < Rect2DVec_size(reads); k++)
+         {
+            const VkRect2D *queued = Rect2DVec_at(reads, k);
+            if (queued->offset.x <= copy.offset.x &&
+                queued->offset.y <= copy.offset.y &&
+                queued->offset.x + (int32_t)queued->extent.width >=
+                   copy.offset.x + (int32_t)copy.extent.width &&
+                queued->offset.y + (int32_t)queued->extent.height >=
+                   copy.offset.y + (int32_t)copy.extent.height)
+               break;
+         }
+         if (k < Rect2DVec_size(reads))
+            continue;
+
+         for (k = 0; k < Rect2DVec_size(reads); k++)
+         {
+            const VkRect2D *queued = Rect2DVec_at(reads, k);
+            if (copy.offset.x <= queued->offset.x &&
+                copy.offset.y <= queued->offset.y &&
+                copy.offset.x + (int32_t)copy.extent.width >=
+                   queued->offset.x + (int32_t)queued->extent.width &&
+                copy.offset.y + (int32_t)copy.extent.height >=
+                   queued->offset.y + (int32_t)queued->extent.height)
+               continue;
+            *Rect2DVec_at(reads, out++) = *queued;
+         }
+         reads->count = out;
+         Rect2DVec_push(reads, &copy);
+      }
+}
+
    static void fbatlas_read_texture(FBAtlas *self, Domain domain,
          bool read_palette)
    {
@@ -18597,6 +18763,9 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       }
       shifted.x += self->renderpass.texture_offset_x;
       shifted.y += self->renderpass.texture_offset_y;
+
+      if (domain == Domain_Scaled)
+         fbatlas_queue_scaled_texture_read(self, &shifted);
 
       /* Domain domain = palette ? Domain_Unscaled : fbatlas_find_suitable_domain(self, shifted); */
       fbatlas_sync_domain(self, domain, &shifted);
