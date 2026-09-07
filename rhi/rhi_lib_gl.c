@@ -8077,6 +8077,23 @@ static void gl_mirror_fb_out_to_fb_texture(gl_renderer *renderer,
       glFinish();
 }
 
+static void gl_copy_fb_out_to_feedback(gl_renderer *renderer,
+      unsigned x, unsigned y, unsigned w, unsigned h)
+{
+   unsigned scale = renderer->internal_upscaling;
+
+   if (gl_caps.fp_glCopyImageSubData)
+      gl_caps.fp_glCopyImageSubData(
+            renderer->fb_out.id, GL_TEXTURE_2D, 0,
+            x * scale, y * scale, 0,
+            renderer->fb_feedback_texture.id, GL_TEXTURE_2D, 0,
+            x * scale, y * scale, 0,
+            w * scale, h * scale, 1);
+   else
+      gl_blit_fb_out(renderer, &renderer->fb_feedback_texture,
+            scale, x, y, w, h);
+}
+
 static void gl_snapshot_fb_out(gl_renderer *renderer,
       unsigned x, unsigned y, unsigned w, unsigned h)
 {
@@ -8091,19 +8108,15 @@ static void gl_snapshot_fb_out(gl_renderer *renderer,
    first_w = w < VRAM_WIDTH_PIXELS - x ? w : VRAM_WIDTH_PIXELS - x;
    first_h = h < VRAM_HEIGHT - y ? h : VRAM_HEIGHT - y;
 
-   gl_blit_fb_out(renderer, &renderer->fb_feedback_texture,
-         renderer->internal_upscaling, x, y, first_w, first_h);
+   gl_copy_fb_out_to_feedback(renderer, x, y, first_w, first_h);
    if (w > first_w)
-      gl_blit_fb_out(renderer, &renderer->fb_feedback_texture,
-            renderer->internal_upscaling, 0, y, w - first_w, first_h);
+      gl_copy_fb_out_to_feedback(renderer, 0, y, w - first_w, first_h);
    if (h > first_h)
    {
-      gl_blit_fb_out(renderer, &renderer->fb_feedback_texture,
-            renderer->internal_upscaling, x, 0, first_w, h - first_h);
+      gl_copy_fb_out_to_feedback(renderer, x, 0, first_w, h - first_h);
       if (w > first_w)
-         gl_blit_fb_out(renderer, &renderer->fb_feedback_texture,
-               renderer->internal_upscaling, 0, 0,
-               w - first_w, h - first_h);
+         gl_copy_fb_out_to_feedback(renderer,
+               0, 0, w - first_w, h - first_h);
    }
 
    gl_vram_sync_clean_scaled_rect(renderer, x, y, w, h);
