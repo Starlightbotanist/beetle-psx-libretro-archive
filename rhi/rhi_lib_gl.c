@@ -2858,8 +2858,11 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
          /* Pending vertices must reach fb_out before they are copied. */
          if (!gl_draw_buffer_is_empty(renderer->command_buffer))
          {
-            renderer->scaled_diag.draw_flushes++;
-            gl_renderer_draw(renderer);
+            if (!scaled_feedback)
+            {
+               renderer->scaled_diag.draw_flushes++;
+               gl_renderer_draw(renderer);
+            }
          }
 
          if (texture_dirty &&
