@@ -2862,11 +2862,17 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
             gl_renderer_draw(renderer);
          }
 
-         if (texture_dirty &&
-             (!scaled_feedback || renderer->texture_tracking_enabled))
-            gl_vram_sync_mirror_rect(renderer,
-                  producer_rect.x, producer_rect.y,
-                  producer_rect.width, producer_rect.height);
+         if (texture_dirty)
+         {
+            if (scaled_feedback)
+               gl_snapshot_fb_out(renderer,
+                     producer_rect.x, producer_rect.y,
+                     producer_rect.width, producer_rect.height);
+            if (!scaled_feedback || renderer->texture_tracking_enabled)
+               gl_vram_sync_mirror_rect(renderer,
+                     producer_rect.x, producer_rect.y,
+                     producer_rect.width, producer_rect.height);
+         }
 
          /* A texture resolve may already have covered the palette row. */
          if (clut_dirty && gl_vram_sync_rect_is_dirty(renderer,
@@ -2893,8 +2899,8 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
          {
             if (texture_dirty)
                gl_vram_sync_clean_rect(renderer,
-                     texture_rect.x, texture_rect.y,
-                     texture_rect.width, texture_rect.height);
+                     producer_rect.x, producer_rect.y,
+                     producer_rect.width, producer_rect.height);
             if (clut_dirty)
                gl_vram_sync_clean_rect(renderer,
                      v[0].clut[0], v[0].clut[1], clut_width, 1);
