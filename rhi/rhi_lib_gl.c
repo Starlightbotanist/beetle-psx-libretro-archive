@@ -2201,7 +2201,7 @@ static TTRect gl_tt_texture_vram_rect(gl_renderer *r,
       unsigned texpage_x, unsigned texpage_y,
       unsigned min_u, unsigned min_v,
       unsigned max_u, unsigned max_v,
-      unsigned shift)
+      unsigned shift, bool hd_texture)
 {
    TTRect out = make_rect(0, 0, 0, 0);
    if (r->tex_x_mask == 0xffu && r->tex_y_mask == 0xffu)
@@ -2219,13 +2219,15 @@ static TTRect gl_tt_texture_vram_rect(gl_renderer *r,
       {
          unsigned width;
          min_u >>= shift;
-         max_u = (max_u + (1u << shift) - 1) >> shift;
+         if (hd_texture)
+            max_u = (max_u + (1u << shift) - 1) >> shift;
+         else
+            max_u >>= shift;
          width = max_u - min_u + 1;
          out.x = texpage_x + min_u;
          out.y = texpage_y + min_v;
-         /* -1 due to the boundary rounding above (see the Vulkan
-          * counterpart's HDTODO note). */
-         out.width = width - 1;
+         /* HD bounds retain the Vulkan tracker's boundary convention. */
+         out.width = hd_texture ? width - 1 : width;
          out.height = height;
       }
    }
@@ -2804,7 +2806,7 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
       TTRect texture_rect = gl_tt_texture_vram_rect(renderer,
             v[0].texture_page[0], v[0].texture_page[1],
             v[0].texture_limits[0], v[0].texture_limits[1],
-            v[0].texture_limits[2], v[0].texture_limits[3], depth);
+            v[0].texture_limits[2], v[0].texture_limits[3], depth, false);
       TTRect producer_rect;
       unsigned clut_width = depth == 1 ? 256u : 16u;
       bool texture_dirty;
@@ -3009,7 +3011,7 @@ static HdTextureHandle gl_tt_query_hd(gl_renderer *r,
          v[0].texture_page[0], v[0].texture_page[1],
          v[0].texture_limits[0], v[0].texture_limits[1],
          v[0].texture_limits[2], v[0].texture_limits[3],
-         shift);
+         shift, true);
    if (vram_rect.height == 0)
       return hd_handle_make_none();
 
@@ -8156,8 +8158,16 @@ static void gl_copy_fb_out_to_feedback(gl_renderer *renderer,
 {
    unsigned scale = renderer->internal_upscaling;
 
-   gl_blit_fb_out(renderer, &renderer->fb_feedback_texture,
-         scale, x, y, w, h);
+   if (gl_caps.fp_glCopyImageSubData)
+      gl_caps.fp_glCopyImageSubData(
+            renderer->fb_out.id, GL_TEXTURE_2D, 0,
+            x * scale, y * scale, 0,
+            renderer->fb_feedback_texture.id, GL_TEXTURE_2D, 0,
+            x * scale, y * scale, 0,
+            w * scale, h * scale, 1);
+   else
+      gl_blit_fb_out(renderer, &renderer->fb_feedback_texture,
+            scale, x, y, w, h);
 }
 
 static void gl_snapshot_fb_out(gl_renderer *renderer,
