@@ -1059,6 +1059,18 @@ struct gl_renderer {
    bool palette_cache_gpu_written;
    bool palette_cache_valid;
    bool palette_cache_saved;
+   struct
+   {
+      uint64_t frame;
+      uint64_t feedback_primitives;
+      uint64_t dependencies;
+      uint64_t draw_flushes;
+      uint64_t scaled_queries;
+      uint64_t scaled_tiles;
+      uint64_t snapshot_calls;
+      uint64_t snapshot_blits;
+      uint64_t snapshot_pixels;
+   } scaled_diag;
 };
 typedef struct gl_renderer gl_renderer;
 
@@ -2330,6 +2342,9 @@ static bool gl_vram_sync_rect_has_mask(gl_renderer *renderer,
    if (!w || !h)
       return false;
 
+   if (scaled_dirty)
+      renderer->scaled_diag.scaled_queries++;
+
    x %= VRAM_WIDTH_PIXELS;
    y %= VRAM_HEIGHT;
    tx0 = x / GL_VRAM_SYNC_TILE_SIZE;
@@ -2349,6 +2364,9 @@ static bool gl_vram_sync_rect_has_mask(gl_renderer *renderer,
          uint64_t mask = scaled_dirty ?
                renderer->vram_sync.tiles[ty][tx].scaled_dirty_mask :
                renderer->vram_sync.tiles[ty][tx].gpu_written_mask;
+
+         if (scaled_dirty)
+            renderer->scaled_diag.scaled_tiles++;
 
          if (read_mask & mask)
             return true;
@@ -2831,11 +2849,18 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
       scaled_feedback = framebuffer_feedback &&
             renderer->internal_upscaling > 1;
 
+      if (scaled_feedback)
+         renderer->scaled_diag.feedback_primitives++;
+
       if (texture_dirty || clut_dirty)
       {
+         renderer->scaled_diag.dependencies++;
          /* Pending vertices must reach fb_out before they are copied. */
          if (!gl_draw_buffer_is_empty(renderer->command_buffer))
+         {
+            renderer->scaled_diag.draw_flushes++;
             gl_renderer_draw(renderer);
+         }
 
          if (texture_dirty &&
              (!scaled_feedback || renderer->texture_tracking_enabled))
@@ -6575,6 +6600,31 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
     * every tile current for the start of the next frame. */
    gl_vram_sync_clear(renderer);
 
+   renderer->scaled_diag.frame++;
+   if ((renderer->scaled_diag.frame % 120) == 0)
+   {
+      log_cb(RETRO_LOG_INFO,
+            "[GL scaled feedback] frames=120 feedback=%llu dependencies=%llu "
+            "flushes=%llu queries=%llu tiles=%llu snapshots=%llu blits=%llu "
+            "pixels=%llu\n",
+            (unsigned long long)renderer->scaled_diag.feedback_primitives,
+            (unsigned long long)renderer->scaled_diag.dependencies,
+            (unsigned long long)renderer->scaled_diag.draw_flushes,
+            (unsigned long long)renderer->scaled_diag.scaled_queries,
+            (unsigned long long)renderer->scaled_diag.scaled_tiles,
+            (unsigned long long)renderer->scaled_diag.snapshot_calls,
+            (unsigned long long)renderer->scaled_diag.snapshot_blits,
+            (unsigned long long)renderer->scaled_diag.snapshot_pixels);
+      renderer->scaled_diag.feedback_primitives = 0;
+      renderer->scaled_diag.dependencies = 0;
+      renderer->scaled_diag.draw_flushes = 0;
+      renderer->scaled_diag.scaled_queries = 0;
+      renderer->scaled_diag.scaled_tiles = 0;
+      renderer->scaled_diag.snapshot_calls = 0;
+      renderer->scaled_diag.snapshot_blits = 0;
+      renderer->scaled_diag.snapshot_pixels = 0;
+   }
+
    cleanup_gl_state();
 
    /* When using a hardware renderer we set the data pointer to
@@ -8103,20 +8153,32 @@ static void gl_snapshot_fb_out(gl_renderer *renderer,
    if (!w || !h || !renderer->fb_feedback_texture.id)
       return;
 
+   renderer->scaled_diag.snapshot_calls++;
+   renderer->scaled_diag.snapshot_pixels += (uint64_t)w * h *
+         renderer->internal_upscaling * renderer->internal_upscaling;
+
    x %= VRAM_WIDTH_PIXELS;
    y %= VRAM_HEIGHT;
    first_w = w < VRAM_WIDTH_PIXELS - x ? w : VRAM_WIDTH_PIXELS - x;
    first_h = h < VRAM_HEIGHT - y ? h : VRAM_HEIGHT - y;
 
    gl_copy_fb_out_to_feedback(renderer, x, y, first_w, first_h);
+   renderer->scaled_diag.snapshot_blits++;
    if (w > first_w)
+   {
       gl_copy_fb_out_to_feedback(renderer, 0, y, w - first_w, first_h);
+      renderer->scaled_diag.snapshot_blits++;
+   }
    if (h > first_h)
    {
       gl_copy_fb_out_to_feedback(renderer, x, 0, first_w, h - first_h);
+      renderer->scaled_diag.snapshot_blits++;
       if (w > first_w)
+      {
          gl_copy_fb_out_to_feedback(renderer,
                0, 0, w - first_w, h - first_h);
+         renderer->scaled_diag.snapshot_blits++;
+      }
    }
 
    gl_vram_sync_clean_scaled_rect(renderer, x, y, w, h);
