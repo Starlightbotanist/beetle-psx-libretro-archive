@@ -5114,6 +5114,8 @@ static const DeviceFeatures *device_get_device_features(Device *self) { return &
    typedef enum StatusFlag StatusFlag;
    typedef uint16_t StatusFlags;
 
+#define FBATLAS_BLOCK_WORDS ((NUM_BLOCKS_X * NUM_BLOCKS_Y) / 32)
+
    struct Renderer;
 
    /* VRAM framebuffer atlas / hazard tracker. Formerly a class whose only
@@ -5124,6 +5126,10 @@ static const DeviceFeatures *device_get_device_features(Device *self) { return &
    struct FBAtlas
    {
       StatusFlags fb_info[NUM_BLOCKS_X * NUM_BLOCKS_Y];
+      /* Fragment ownership uses render-pass bounds; these track blocks
+       * covered by actual queued draws. */
+      uint32_t native_dirty[FBATLAS_BLOCK_WORDS];
+      uint32_t pending_fragment_write[FBATLAS_BLOCK_WORDS];
       Renderer *listener;
 
       /* Retained CLUT selection (see fbatlas_palette_preserve). valid: a
@@ -5248,11 +5254,54 @@ static StatusFlags *fbatlas_info(FBAtlas *self,
       return &self->fb_info[NUM_BLOCKS_X * block_y + block_x];
    }
 
+   static bool fbatlas_block_test(const uint32_t *blocks,
+         unsigned block_x,
+         unsigned block_y)
+   {
+      unsigned index = NUM_BLOCKS_X * (block_y & (NUM_BLOCKS_Y - 1)) +
+            (block_x & (NUM_BLOCKS_X - 1));
+      return (blocks[index / 32] & (1u << (index & 31))) != 0;
+   }
+
+   static void fbatlas_block_update(uint32_t *blocks,
+         unsigned block_x,
+         unsigned block_y,
+         bool set)
+   {
+      unsigned index = NUM_BLOCKS_X * (block_y & (NUM_BLOCKS_Y - 1)) +
+            (block_x & (NUM_BLOCKS_X - 1));
+      uint32_t bit = 1u << (index & 31);
+      if (set)
+         blocks[index / 32] |= bit;
+      else
+         blocks[index / 32] &= ~bit;
+   }
+
+   static void fbatlas_mark_blocks(uint32_t *blocks,
+         const TTRect *rect)
+   {
+      unsigned xbegin, xend, ybegin, yend, x, y;
+
+      if (!rect->width || !rect->height)
+         return;
+
+      xbegin = rect->x / BLOCK_WIDTH;
+      xend = (rect->x + rect->width - 1) / BLOCK_WIDTH;
+      ybegin = rect->y / BLOCK_HEIGHT;
+      yend = (rect->y + rect->height - 1) / BLOCK_HEIGHT;
+
+      for (y = ybegin; y <= yend; y++)
+         for (x = xbegin; x <= xend; x++)
+            fbatlas_block_update(blocks, x, y, true);
+   }
+
    static void fbatlas_init(FBAtlas *a)
    {
       unsigned i;
       for (i = 0; i < NUM_BLOCKS_X * NUM_BLOCKS_Y; i++)
          a->fb_info[i] = STATUS_FB_PREFER;
+      memset(a->native_dirty, 0, sizeof(a->native_dirty));
+      memset(a->pending_fragment_write, 0, sizeof(a->pending_fragment_write));
       a->listener = NULL;
       a->palette_cache_x = 0;
       a->palette_cache_y = 0;
@@ -18766,7 +18815,9 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
          {
             StatusFlags status = *fbatlas_info(self, x, y);
             if ((status & STATUS_TEXTURE_RENDERED) ||
-                (status & STATUS_OWNERSHIP_MASK) == STATUS_SFB_ONLY)
+                ((status & STATUS_OWNERSHIP_MASK) == STATUS_SFB_ONLY &&
+                 (fbatlas_block_test(self->native_dirty, x, y) ||
+                  fbatlas_block_test(self->pending_fragment_write, x, y))))
                return true; } } }
       return false;
       }
@@ -19004,7 +19055,18 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
          fbatlas_pipeline_barrier(self, write_domains);
 
       { unsigned y; for (y = ybegin; y <= yend; y++)
-         { unsigned x; for (x = xbegin; x <= xend; x++) (*fbatlas_info(self, x, y)) = ((*fbatlas_info(self, x, y)) & ~STATUS_OWNERSHIP_MASK) | resolve_domains; } }
+         { unsigned x; for (x = xbegin; x <= xend; x++)
+         {
+            StatusFlags *status = fbatlas_info(self, x, y);
+            *status = (*status & ~STATUS_OWNERSHIP_MASK) | resolve_domains;
+            if (domain == Domain_Unscaled)
+            {
+               fbatlas_block_update(self->native_dirty, x, y, false);
+               fbatlas_block_update(self->pending_fragment_write, x, y, false);
+            }
+            else if (stage != Stage_Fragment)
+               fbatlas_block_update(self->native_dirty, x, y, true);
+         } } }
 
       return (write_domains & STATUS_FRAGMENT_SFB_READ) != 0;
       }
@@ -19136,7 +19198,8 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
              * We might have to wait for writers on read,
              * and add hazard masks for our writes
              * so other readers can wait for us. */
-            if (((*mask) & STATUS_OWNERSHIP_MASK) == ownership)
+            if (((*mask) & STATUS_OWNERSHIP_MASK) == ownership &&
+                (domain == Domain_Scaled || fbatlas_block_test(self->native_dirty, x, y)))
                write_domains |= (*mask) & hazard_domains;
          } }
       } }
@@ -19150,8 +19213,17 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
             StatusFlags *mask = fbatlas_info(self, x, y);
             if (((*mask) & STATUS_OWNERSHIP_MASK) == ownership)
             {
+               if (domain == Domain_Unscaled &&
+                   !fbatlas_block_test(self->native_dirty, x, y))
+               {
+                  (*mask) &= ~STATUS_OWNERSHIP_MASK;
+                  (*mask) |= STATUS_SFB_PREFER;
+                  continue;
+               }
                (*mask) &= ~STATUS_OWNERSHIP_MASK;
                (*mask) |= resolve_domains;
+               if (domain == Domain_Unscaled)
+                  fbatlas_block_update(self->native_dirty, x, y, false);
                renderer_resolve(self->listener, domain, (BLOCK_WIDTH * x) & (FB_WIDTH - 1), (BLOCK_HEIGHT * y) & (FB_HEIGHT - 1));
             }
          } }
@@ -19208,8 +19280,6 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
 
    static void fbatlas_flush_render_pass(FBAtlas *self)
    {
-      unsigned xend;
-      unsigned xbegin;
       if (!self->renderpass.inside)
          return;
 
@@ -19225,13 +19295,15 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       fbatlas_write_domain(self, Domain_Scaled, Stage_Fragment, rect);
       renderer_flush_render_pass(self->listener, rect);
 
-      xbegin = rect->x / BLOCK_WIDTH;
-      xend = (rect->x + rect->width - 1) / BLOCK_WIDTH;
-      { unsigned ybegin = rect->y / BLOCK_HEIGHT;
-      unsigned yend = (rect->y + rect->height - 1) / BLOCK_HEIGHT;
-      { unsigned y; for (y = ybegin; y <= yend; y++)
-         { unsigned x; for (x = xbegin; x <= xend; x++) (*fbatlas_info(self, x, y)) |= STATUS_TEXTURE_RENDERED; } }
-      }
+      { unsigned i; for (i = 0; i < FBATLAS_BLOCK_WORDS; i++)
+      {
+         uint32_t iter, bit;
+         uint32_t pending = self->pending_fragment_write[i];
+         self->native_dirty[i] |= pending;
+         FOR_EACH_BIT(pending, iter, bit)
+            self->fb_info[i * 32 + bit] |= STATUS_TEXTURE_RENDERED;
+         self->pending_fragment_write[i] = 0;
+      } }
       }
    }
 
@@ -19412,6 +19484,7 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       }
 
       fbatlas_extend_render_pass(self, rect, true);
+      fbatlas_mark_blocks(self->pending_fragment_write, &scissored);
    }
 
    static void fbatlas_clear_rect(FBAtlas *self,
@@ -19431,6 +19504,7 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
 
       fbatlas_palette_preserve(self, rect);
       fbatlas_extend_render_pass(self, rect, false);
+      fbatlas_mark_blocks(self->pending_fragment_write, rect);
 
       /* If the render pass area doesn't increase later, we can use loadOp ==
        * CLEAR instead of LOAD, which helps a lot on mobile GPUs. */
@@ -19448,6 +19522,8 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
    static void fbatlas_discard_render_pass(FBAtlas *self)
    {
       self->renderpass.inside = false;
+      memset(self->pending_fragment_write, 0,
+            sizeof(self->pending_fragment_write));
       renderer_reset_queue(self->listener);
    }
 
