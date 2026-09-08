@@ -9273,6 +9273,12 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
          }
       }
    }
+   if (self->render_state.texture_mode == TextureMode_ABGR1555)
+   {
+      const TTRect target = { 416, 416, 16, 32 };
+      if (rect_intersects(&rect, &target))
+         param = (int16_t)(param | 0x800);
+   }
    if (self->render_state.primitive_dither)
       param = (int16_t)((uint16_t)param | 0x8000u);
 
