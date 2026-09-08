@@ -8993,7 +8993,7 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    bool *filtering_out, bool *scaled_read_out, unsigned *shift_out, bool *offset_uv_out){
       int16_t param;
       float z;
-   unsigned shift; bool filtering, scaled_read, offset_uv; HdTextureHandle hd_texture_index = hd_handle_make_none(); /* local working copies; written back to *_out at function end. hd_texture_index MUST be initialised: it is only assigned for textured primitives (hd_texture_vram.height > 0); untextured draws would otherwise write back an uninitialised garbage HD handle (benign zeros at -O0, real garbage at -O3 -> bogus handles -> stale-handle flood and crashes). */
+   unsigned shift; bool filtering, scaled_read, offset_uv, native_index_read = false; HdTextureHandle hd_texture_index = hd_handle_make_none(); /* local working copies; written back to *_out at function end. hd_texture_index MUST be initialised: it is only assigned for textured primitives (hd_texture_vram.height > 0); untextured draws would otherwise write back an uninitialised garbage HD handle (benign zeros at -O0, real garbage at -O3 -> bogus handles -> stale-handle flood and crashes). */
    switch (self->render_state.texture_mode)
    {
    case TextureMode_Palette4bpp:
@@ -9127,7 +9127,22 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    else
    {
       filtering = self->render_state.texture_mode != TextureMode_None;
-      scaled_read = false;
+      if (self->render_state.texture_mode != TextureMode_None)
+      {
+         TTRect palette_rect = {
+            self->render_state.palette_offset_x,
+            self->render_state.palette_offset_y,
+            self->render_state.texture_mode == TextureMode_Palette8bpp ? 256u : 16u,
+            1
+         };
+         bool texture_rendered = fbatlas_texture_rendered(&self->atlas, &hd_texture_vram);
+         bool palette_rendered = fbatlas_texture_rendered(&self->atlas, &palette_rect);
+
+         scaled_read = texture_rendered || palette_rendered;
+         native_index_read = !texture_rendered && palette_rendered;
+      }
+      else
+         scaled_read = false;
    }
    offset_uv = self->scaled_uv_offset && self->render_state.primitive_type == PrimitiveType_Polygon;
 
@@ -9139,20 +9154,13 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
     * because the `allocate_depth` call above can call `reset_queue` which would
     * invalidate the HdTextureHandle */
    param = (int16_t)(shift);
+   if (native_index_read)
+      param = (int16_t)(param | 0x2000);
    /* 0x1000: the selected CLUT was overwritten after it was latched; sample
     * the retained copy (uPalette) instead of VRAM. Set right after
     * renderer_allocate_depth, which is what resolves it for this draw. */
    if (shift != 0 && self->atlas.palette_cache_saved)
-   {
-      static unsigned retained_palette_bypasses;
-      if (log_cb && retained_palette_bypasses < 64)
-         log_cb(RETRO_LOG_INFO,
-               "[VK_LAVA_CACHE_BYPASS] pal=%u,%u mode=%u\n",
-               self->render_state.palette_offset_x,
-               self->render_state.palette_offset_y,
-               (unsigned)self->render_state.texture_mode);
-      retained_palette_bypasses++;
-   }
+      param = (int16_t)(param | 0x1000);
    if (hd_texture_vram.height > 0) { /* This condition is just a dumb way to check that the rect was actually set to something */
       bool fastpath_capable_out = false;
       bool cache_hit = false;
@@ -9737,7 +9745,6 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
 {
    RenderPassInfo_Subpass subpass;
    renderer_ensure_command_buffer(self);
-   renderer_flush_resolves(self);
    renderer_snapshot_scaled_texture_reads(self);
 
    { RenderPassInfo info;
@@ -9841,8 +9848,12 @@ static void renderer_dispatch_set_scaled_read_texture(Renderer *self,
       bool textured)
 {
    if (scaled_read)
+   {
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0,
             renderer_get_scaled_read_view(self), StockSampler_NearestClamp);
+      commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 6,
+            image_get_view(ih_get(&self->framebuffer)), StockSampler_NearestClamp);
+   }
    else
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer)), StockSampler_NearestClamp);
    if (textured)
@@ -10727,8 +10738,12 @@ static void renderer_reset_queue(Renderer *self)
 static void renderer_semi_transparent_set_state(Renderer *self,
       const SemiTransparentState *state){
    if (state->scaled_read)
+   {
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0,
             renderer_get_scaled_read_view(self), StockSampler_NearestClamp);
+      commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 6,
+            image_get_view(ih_get(&self->framebuffer)), StockSampler_NearestClamp);
+   }
    else
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer)), StockSampler_NearestClamp);
    renderer_hd_texture_uniforms(self, state->hd_texture_index);
@@ -18917,32 +18932,7 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
          self->renderpass.texture_mode == TextureMode_Palette8bpp ? 256u : 16u, 1 };
 
       if (palette && read_palette)
-      {
          fbatlas_sync_domain(self, domain, &palette_rect);
-
-         if (domain == Domain_Unscaled &&
-             fbatlas_texture_rendered(self, &palette_rect))
-         {
-            unsigned xbegin = palette_rect.x / BLOCK_WIDTH;
-            unsigned xend = (palette_rect.x + palette_rect.width - 1) / BLOCK_WIDTH;
-            unsigned y = palette_rect.y / BLOCK_HEIGHT;
-            unsigned x;
-            static unsigned forced_palette_resolves;
-
-            if (log_cb && forced_palette_resolves < 64)
-               log_cb(RETRO_LOG_INFO,
-                     "[VK_LAVA_FORCE_RESOLVE] pal=%u,%u %ux%u first_status=0x%04x cached=%u\n",
-                     palette_rect.x, palette_rect.y,
-                     palette_rect.width, palette_rect.height,
-                     (unsigned)*fbatlas_info(self, xbegin, y),
-                     self->palette_cache_saved);
-            forced_palette_resolves++;
-
-            for (x = xbegin; x <= xend; x++)
-               renderer_resolve(self->listener, Domain_Unscaled,
-                     BLOCK_WIDTH * x, BLOCK_HEIGHT * y);
-         }
-      }
 
       if (domain == Domain_Scaled && self->listener->scaling > 1)
       {

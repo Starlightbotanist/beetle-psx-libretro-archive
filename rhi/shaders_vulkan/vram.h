@@ -21,6 +21,7 @@ layout(set = 0, binding = 0) uniform mediump sampler2DMS uFramebufferMS;
 #else
 layout(set = 0, binding = 0) uniform mediump sampler2D uFramebuffer;
 #endif
+layout(set = 0, binding = 6) uniform mediump usampler2D uNativeFramebuffer;
 #endif
 layout(constant_id = 4) const int SHIFT = 0;
 /* Retained copy of the selected CLUT (see fbatlas_palette_preserve). */
@@ -52,15 +53,21 @@ vec4 sample_vram_atlas(vec2 uvv)
         int phase = uv.x & ((1 << shift) - 1);
         int align = bpp * phase;
         uv.x >>= shift;
+        int value;
 #if defined(UNSCALED)
-        int value = int(texelFetch(uFramebuffer, (vBaseUV + uv) & FB_MASK, 0).x);
+        value = int(texelFetch(uFramebuffer, (vBaseUV + uv) & FB_MASK, 0).x);
 #else
-        uv = ivec2(mod((vBaseUV + uv), FB_SIZE));
+        if ((params.z & 0x2000) != 0)
+            value = int(texelFetch(uNativeFramebuffer, (vBaseUV + uv) & FB_MASK, 0).x);
+        else
+        {
+            uv = ivec2(mod((vBaseUV + uv), FB_SIZE));
 #if defined(MSAA)
-        int value = int(pack_abgr1555(texelFetch(uFramebufferMS, uv * SCALE, gl_SampleID)));
+            value = int(pack_abgr1555(texelFetch(uFramebufferMS, uv * SCALE, gl_SampleID)));
 #else
-        int value = int(pack_abgr1555(texelFetch(uFramebuffer, uv * SCALE, 0)));
+            value = int(pack_abgr1555(texelFetch(uFramebuffer, uv * SCALE, 0)));
 #endif
+        }
 #endif
         int mask = (1 << bpp) - 1;
         value = (value >> align) & mask;
