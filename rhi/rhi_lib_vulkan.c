@@ -18908,7 +18908,31 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
          self->renderpass.texture_mode == TextureMode_Palette8bpp ? 256u : 16u, 1 };
 
       if (palette && read_palette)
+      {
          fbatlas_sync_domain(self, domain, &palette_rect);
+
+         if (domain == Domain_Unscaled &&
+             fbatlas_texture_rendered(self, &palette_rect))
+         {
+            unsigned xbegin = palette_rect.x / BLOCK_WIDTH;
+            unsigned xend = (palette_rect.x + palette_rect.width - 1) / BLOCK_WIDTH;
+            unsigned y = palette_rect.y / BLOCK_HEIGHT;
+            unsigned x;
+            static unsigned forced_palette_resolves;
+
+            if (log_cb && forced_palette_resolves < 64)
+               log_cb(RETRO_LOG_INFO,
+                     "[VK_LAVA_FORCE_RESOLVE] pal=%u,%u %ux%u first_status=0x%04x\n",
+                     palette_rect.x, palette_rect.y,
+                     palette_rect.width, palette_rect.height,
+                     (unsigned)*fbatlas_info(self, xbegin, y));
+            forced_palette_resolves++;
+
+            for (x = xbegin; x <= xend; x++)
+               renderer_resolve(self->listener, Domain_Unscaled,
+                     BLOCK_WIDTH * x, BLOCK_HEIGHT * y);
+         }
+      }
 
       if (domain == Domain_Scaled && self->listener->scaling > 1)
       {
