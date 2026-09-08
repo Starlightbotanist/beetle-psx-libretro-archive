@@ -5130,6 +5130,9 @@ static const DeviceFeatures *device_get_device_features(Device *self) { return &
        * covered by actual queued draws. */
       uint32_t native_dirty[FBATLAS_BLOCK_WORDS];
       uint32_t pending_fragment_write[FBATLAS_BLOCK_WORDS];
+      uint32_t fragment_dirty[FBATLAS_BLOCK_WORDS];
+      uint32_t compute_dirty[FBATLAS_BLOCK_WORDS];
+      uint32_t transfer_dirty[FBATLAS_BLOCK_WORDS];
       Renderer *listener;
 
       /* Retained CLUT selection (see fbatlas_palette_preserve). valid: a
@@ -5302,6 +5305,9 @@ static StatusFlags *fbatlas_info(FBAtlas *self,
          a->fb_info[i] = STATUS_FB_PREFER;
       memset(a->native_dirty, 0, sizeof(a->native_dirty));
       memset(a->pending_fragment_write, 0, sizeof(a->pending_fragment_write));
+      memset(a->fragment_dirty, 0, sizeof(a->fragment_dirty));
+      memset(a->compute_dirty, 0, sizeof(a->compute_dirty));
+      memset(a->transfer_dirty, 0, sizeof(a->transfer_dirty));
       a->listener = NULL;
       a->palette_cache_x = 0;
       a->palette_cache_y = 0;
@@ -18968,6 +18974,45 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       shifted.y += self->renderpass.texture_offset_y;
 
       texture_domain = palette ? Domain_Unscaled : domain;
+      if (palette && domain == Domain_Scaled && log_cb)
+      {
+         static unsigned record_count;
+         unsigned xbegin = shifted.x / BLOCK_WIDTH;
+         unsigned xend = (shifted.x + shifted.width - 1) / BLOCK_WIDTH;
+         unsigned ybegin = shifted.y / BLOCK_HEIGHT;
+         unsigned yend = (shifted.y + shifted.height - 1) / BLOCK_HEIGHT;
+         unsigned dirty_count = 0;
+         unsigned pending_count = 0;
+         unsigned x, y;
+
+         for (y = ybegin; y <= yend; y++)
+            for (x = xbegin; x <= xend; x++)
+            {
+               dirty_count += fbatlas_block_test(self->native_dirty, x, y);
+               pending_count += fbatlas_block_test(self->pending_fragment_write, x, y);
+            }
+
+         if ((dirty_count || pending_count) && record_count < 16384)
+         {
+            unsigned record = record_count++;
+            log_cb(RETRO_LOG_INFO,
+                  "[VK_INDEX_PROV] record=%u mode=%u tex=%u,%u %ux%u dirty=%u pending=%u\n",
+                  record, (unsigned)self->renderpass.texture_mode,
+                  shifted.x, shifted.y, shifted.width, shifted.height,
+                  dirty_count, pending_count);
+            for (y = ybegin; y <= yend; y++)
+               for (x = xbegin; x <= xend; x++)
+                  if (fbatlas_block_test(self->native_dirty, x, y) ||
+                      fbatlas_block_test(self->pending_fragment_write, x, y))
+                     log_cb(RETRO_LOG_INFO,
+                           "[VK_INDEX_BLOCK] record=%u block=%u,%u status=%04x fragment=%u compute=%u transfer=%u pending=%u\n",
+                           record, x, y, (unsigned)*fbatlas_info(self, x, y),
+                           (unsigned)fbatlas_block_test(self->fragment_dirty, x, y),
+                           (unsigned)fbatlas_block_test(self->compute_dirty, x, y),
+                           (unsigned)fbatlas_block_test(self->transfer_dirty, x, y),
+                           (unsigned)fbatlas_block_test(self->pending_fragment_write, x, y));
+         }
+      }
       fbatlas_sync_domain(self, texture_domain, &shifted);
 
       { TTRect palette_rect = { self->renderpass.palette_offset_x, self->renderpass.palette_offset_y,
@@ -19063,9 +19108,18 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
             {
                fbatlas_block_update(self->native_dirty, x, y, false);
                fbatlas_block_update(self->pending_fragment_write, x, y, false);
+               fbatlas_block_update(self->fragment_dirty, x, y, false);
+               fbatlas_block_update(self->compute_dirty, x, y, false);
+               fbatlas_block_update(self->transfer_dirty, x, y, false);
             }
             else if (stage != Stage_Fragment)
+            {
                fbatlas_block_update(self->native_dirty, x, y, true);
+               if (stage == Stage_Compute)
+                  fbatlas_block_update(self->compute_dirty, x, y, true);
+               else if (stage == Stage_Transfer)
+                  fbatlas_block_update(self->transfer_dirty, x, y, true);
+            }
          } } }
 
       return (write_domains & STATUS_FRAGMENT_SFB_READ) != 0;
@@ -19223,7 +19277,12 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
                (*mask) &= ~STATUS_OWNERSHIP_MASK;
                (*mask) |= resolve_domains;
                if (domain == Domain_Unscaled)
+               {
                   fbatlas_block_update(self->native_dirty, x, y, false);
+                  fbatlas_block_update(self->fragment_dirty, x, y, false);
+                  fbatlas_block_update(self->compute_dirty, x, y, false);
+                  fbatlas_block_update(self->transfer_dirty, x, y, false);
+               }
                renderer_resolve(self->listener, domain, (BLOCK_WIDTH * x) & (FB_WIDTH - 1), (BLOCK_HEIGHT * y) & (FB_HEIGHT - 1));
             }
          } }
@@ -19300,6 +19359,7 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
          uint32_t iter, bit;
          uint32_t pending = self->pending_fragment_write[i];
          self->native_dirty[i] |= pending;
+         self->fragment_dirty[i] |= pending;
          FOR_EACH_BIT(pending, iter, bit)
             self->fb_info[i * 32 + bit] |= STATUS_TEXTURE_RENDERED;
          self->pending_fragment_write[i] = 0;
