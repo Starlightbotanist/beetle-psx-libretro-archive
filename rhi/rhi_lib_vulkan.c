@@ -18917,7 +18917,8 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       shifted.y += self->renderpass.texture_offset_y;
 
       texture_domain = palette ? Domain_Unscaled : domain;
-      fbatlas_sync_domain(self, texture_domain, &shifted);
+      if (!palette || domain == Domain_Unscaled)
+         fbatlas_sync_domain(self, texture_domain, &shifted);
 
       { TTRect palette_rect = { self->renderpass.palette_offset_x, self->renderpass.palette_offset_y,
          self->renderpass.texture_mode == TextureMode_Palette8bpp ? 256u : 16u, 1 };
