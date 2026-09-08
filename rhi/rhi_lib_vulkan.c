@@ -9162,6 +9162,33 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
       (unsigned)(min_x), (unsigned)(min_y), (unsigned)(max_x) - (unsigned)(min_x), (unsigned)(max_y) - (unsigned)(min_y),
    };
 
+   if (log_cb)
+   {
+      static unsigned writer_record_count;
+      const TTRect target = { 416, 416, 16, 32 };
+      TTRect scissored = rect_scissor(&rect, &self->render_state.draw_rect);
+
+      if (writer_record_count < 32768 && rect_intersects(&scissored, &target))
+      {
+         const Vertex *v3 = count == 4 ? &vertices[3] : &vertices[2];
+         log_cb(RETRO_LOG_INFO,
+               "[VK_INDEX_WRITER] record=%u primitive=%u count=%u rect=%u,%u %ux%u mode=%u semi=%u mask=%u v0=%.1f,%.1f v1=%.1f,%.1f v2=%.1f,%.1f v3=%.1f,%.1f\n",
+               writer_record_count++, self->primitive_index, count,
+               scissored.x, scissored.y, scissored.width, scissored.height,
+               (unsigned)self->render_state.texture_mode,
+               (unsigned)self->render_state.semi_transparent,
+               (unsigned)self->render_state.mask_test,
+               vertices[0].x + self->render_state.draw_offset_x,
+               vertices[0].y + self->render_state.draw_offset_y,
+               vertices[1].x + self->render_state.draw_offset_x,
+               vertices[1].y + self->render_state.draw_offset_y,
+               vertices[2].x + self->render_state.draw_offset_x,
+               vertices[2].y + self->render_state.draw_offset_y,
+               v3->x + self->render_state.draw_offset_x,
+               v3->y + self->render_state.draw_offset_y);
+      }
+   }
+
    if (self->render_state.texture_mode == TextureMode_ABGR1555)
    {
       if (rect_intersects(&self->render_state.draw_rect, &rect))
