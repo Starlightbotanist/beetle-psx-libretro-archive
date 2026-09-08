@@ -74,10 +74,11 @@ void main()
 
 	if (FILTER_MODE == 0)
 	{
+		ivec2 source_coord = ivec2(coord * SCALE) + ivec2(SCALE / 2);
 	#if defined(MSAA)
-		value = texelFetch(uScaledMS, ivec2(coord * SCALE), 0);
+		value = texelFetch(uScaledMS, source_coord, 0);
 	#else
-		value = texelFetch(uScaled, ivec2(coord * SCALE), 0);
+		value = texelFetch(uScaled, source_coord, 0);
 	#endif
 	}
 	else
