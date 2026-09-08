@@ -9042,7 +9042,9 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    bool *filtering_out, bool *scaled_read_out, unsigned *shift_out, bool *offset_uv_out){
       int16_t param;
       float z;
-   unsigned shift; bool filtering, scaled_read, offset_uv; HdTextureHandle hd_texture_index = hd_handle_make_none(); /* local working copies; written back to *_out at function end. hd_texture_index MUST be initialised: it is only assigned for textured primitives (hd_texture_vram.height > 0); untextured draws would otherwise write back an uninitialised garbage HD handle (benign zeros at -O0, real garbage at -O3 -> bogus handles -> stale-handle flood and crashes). */
+   unsigned shift; bool filtering, scaled_read, offset_uv;
+   bool direct_texture_rendered = false;
+   HdTextureHandle hd_texture_index = hd_handle_make_none(); /* local working copies; written back to *_out at function end. hd_texture_index MUST be initialised: it is only assigned for textured primitives (hd_texture_vram.height > 0); untextured draws would otherwise write back an uninitialised garbage HD handle (benign zeros at -O0, real garbage at -O3 -> bogus handles -> stale-handle flood and crashes). */
    switch (self->render_state.texture_mode)
    {
    case TextureMode_Palette4bpp:
@@ -9163,9 +9165,9 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
          /* HACK hd_texture_vram should contains the texture we are reading from
           * in vram coordinate avoid texture filtering and enable scaled read if
           * the texture is rendered content */
-         bool texture_rendered = fbatlas_texture_rendered(&self->atlas, &hd_texture_vram);
-         filtering = !texture_rendered;
-         scaled_read = texture_rendered;
+         direct_texture_rendered = fbatlas_texture_rendered(&self->atlas, &hd_texture_vram);
+         filtering = !direct_texture_rendered;
+         scaled_read = direct_texture_rendered;
       }
       else
       {
@@ -9275,6 +9277,52 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    }
    if (self->render_state.primitive_dither)
       param = (int16_t)((uint16_t)param | 0x8000u);
+
+   if (log_cb && self->render_state.texture_mode == TextureMode_ABGR1555)
+   {
+      static unsigned writer_record_count;
+      const TTRect target = { 416, 416, 16, 32 };
+      TTRect scissored = rect_scissor(&rect, &self->render_state.draw_rect);
+
+      if (writer_record_count < 4096 && rect_intersects(&scissored, &target))
+      {
+         unsigned record = writer_record_count++;
+         unsigned i;
+         log_cb(RETRO_LOG_INFO,
+               "[VK_INDEX_SOURCE] record=%u primitive=%u count=%u dst=%u,%u %ux%u src=%u,%u %ux%u rendered=%u scaled=%u filtering=%u overlap=%u param=%04x dither=%u modulate=%u window=%02x,%02x,%02x,%02x uvlimits=%u,%u,%u,%u base=%u,%u feedback=%u\n",
+               record, self->primitive_index, count,
+               scissored.x, scissored.y, scissored.width, scissored.height,
+               hd_texture_vram.x, hd_texture_vram.y,
+               hd_texture_vram.width, hd_texture_vram.height,
+               (unsigned)direct_texture_rendered, (unsigned)scaled_read,
+               (unsigned)filtering,
+               (unsigned)rect_intersects(&scissored, &hd_texture_vram),
+               (unsigned)(uint16_t)param,
+               (unsigned)self->render_state.primitive_dither,
+               (unsigned)self->render_state.texture_color_modulate,
+               (unsigned)self->render_state.texture_window.mask_x,
+               (unsigned)self->render_state.texture_window.mask_y,
+               (unsigned)self->render_state.texture_window.or_x,
+               (unsigned)self->render_state.texture_window.or_y,
+               (unsigned)self->render_state.UVLimits.min_u,
+               (unsigned)self->render_state.UVLimits.min_v,
+               (unsigned)self->render_state.UVLimits.max_u,
+               (unsigned)self->render_state.UVLimits.max_v,
+               self->render_state.texture_offset_x,
+               self->render_state.texture_offset_y,
+               (unsigned)vram_prov_any(self,
+                  (int)hd_texture_vram.x, (int)hd_texture_vram.y,
+                  (int)hd_texture_vram.width + 1,
+                  (int)hd_texture_vram.height));
+         for (i = 0; i < count; i++)
+            log_cb(RETRO_LOG_INFO,
+                  "[VK_INDEX_VERTEX] record=%u vertex=%u xy=%.3f,%.3f uv=%u,%u color=%08x cf=%.6f,%.6f,%.6f\n",
+                  record, i, vertices[i].x, vertices[i].y,
+                  (unsigned)vertices[i].u, (unsigned)vertices[i].v,
+                  vertices[i].color, vertices[i].cf[0],
+                  vertices[i].cf[1], vertices[i].cf[2]);
+      }
+   }
 
    { unsigned i; for (i = 0; i < count; i++) {
       output[i].x = x[i];
