@@ -9127,7 +9127,18 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    else
    {
       filtering = self->render_state.texture_mode != TextureMode_None;
-      scaled_read = false;
+      if (self->render_state.texture_mode != TextureMode_None)
+      {
+         TTRect palette_rect = {
+            self->render_state.palette_offset_x,
+            self->render_state.palette_offset_y,
+            self->render_state.texture_mode == TextureMode_Palette8bpp ? 256u : 16u,
+            1
+         };
+         scaled_read = fbatlas_texture_rendered(&self->atlas, &palette_rect);
+      }
+      else
+         scaled_read = false;
    }
    offset_uv = self->scaled_uv_offset && self->render_state.primitive_type == PrimitiveType_Polygon;
 
@@ -9796,6 +9807,7 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
    self->queue.default_scissor = info.render_area;
    commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 2, image_get_view(ih_get(&self->dither_lut)), StockSampler_NearestWrap);
    commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 5, image_get_view(ih_get(&self->palette_cache)), StockSampler_NearestClamp);
+   commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 6, image_get_view(ih_get(&self->framebuffer)), StockSampler_NearestClamp);
 
    renderer_render_opaque_primitives(self);
    renderer_render_opaque_texture_primitives(self);
@@ -18751,8 +18763,11 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       unsigned yend = (rect->y + rect->height - 1) / BLOCK_HEIGHT;
       { unsigned y; for (y = ybegin; y <= yend; y++)
          { unsigned x; for (x = xbegin; x <= xend; x++)
-            if ((*fbatlas_info(self, x, y)) & STATUS_TEXTURE_RENDERED)
-               return true; } }
+         {
+            StatusFlags status = *fbatlas_info(self, x, y);
+            if ((status & STATUS_TEXTURE_RENDERED) ||
+                (status & STATUS_OWNERSHIP_MASK) == STATUS_SFB_ONLY)
+               return true; } } }
       return false;
       }
    }
@@ -18886,6 +18901,7 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
    {
       TTRect shifted = self->renderpass.texture_window;
       bool palette;
+      Domain texture_domain;
       switch (self->renderpass.texture_mode)
       {
          case TextureMode_Palette4bpp:
@@ -18900,8 +18916,8 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       shifted.x += self->renderpass.texture_offset_x;
       shifted.y += self->renderpass.texture_offset_y;
 
-      /* Domain domain = palette ? Domain_Unscaled : fbatlas_find_suitable_domain(self, shifted); */
-      fbatlas_sync_domain(self, domain, &shifted);
+      texture_domain = palette ? Domain_Unscaled : domain;
+      fbatlas_sync_domain(self, texture_domain, &shifted);
 
       { TTRect palette_rect = { self->renderpass.palette_offset_x, self->renderpass.palette_offset_y,
          self->renderpass.texture_mode == TextureMode_Palette8bpp ? 256u : 16u, 1 };
@@ -18911,12 +18927,13 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
 
       if (domain == Domain_Scaled && self->listener->scaling > 1)
       {
-         fbatlas_queue_scaled_texture_read(self, &shifted);
+         if (!palette)
+            fbatlas_queue_scaled_texture_read(self, &shifted);
          if (palette && read_palette)
             fbatlas_queue_scaled_texture_read(self, &palette_rect);
       }
 
-      fbatlas_read_domain(self, domain, Stage_FragmentTexture, &shifted);
+      fbatlas_read_domain(self, texture_domain, Stage_FragmentTexture, &shifted);
       if (palette && read_palette)
          fbatlas_read_domain(self, domain, Stage_FragmentTexture, &palette_rect);
       }
