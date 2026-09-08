@@ -9225,6 +9225,9 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
       /* This flag says skip hd textures */
       param = param | 0x200;
    }
+   if (!self->render_state.texture_color_modulate &&
+       self->render_state.texture_mode != TextureMode_None)
+      param = param | 0x2000;
 
    /* Fixed-point framebuffer-feedback modulation (Vulkan port of the GL
     * change): when the sampled texture or palette contains GPU-rendered

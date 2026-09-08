@@ -118,6 +118,13 @@ void main()
 	if (opacity < 0.5)
 		discard;
 
+	bool raw_texture = (uint(vParam.z) & 0x2000u) != 0u;
+	if (raw_texture && TRANSPARENCY_MODE != SEMI_TRANS)
+	{
+		FragColor = vec4(color.rgb, NNColor.a + vColor.a);
+		return;
+	}
+
 	bool fixed_feedback = (uint(vParam.z) & 0x800u) != 0u;
 	if (fixed_feedback)
 	{
