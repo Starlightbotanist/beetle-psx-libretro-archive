@@ -9184,6 +9184,7 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
     * is Vulkan-side stale unscaled-domain content under the sampled
     * rect, tracked separately. */
    if (!psx_pgxp_color &&
+       self->render_state.texture_color_modulate &&
        self->render_state.texture_mode != TextureMode_None &&
        hd_texture_vram.height > 0)
    {
