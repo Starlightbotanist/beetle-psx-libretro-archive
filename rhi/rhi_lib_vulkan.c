@@ -18927,8 +18927,7 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
 
       if (domain == Domain_Scaled && self->listener->scaling > 1)
       {
-         if (!palette)
-            fbatlas_queue_scaled_texture_read(self, &shifted);
+         fbatlas_queue_scaled_texture_read(self, &shifted);
          if (palette && read_palette)
             fbatlas_queue_scaled_texture_read(self, &palette_rect);
       }
