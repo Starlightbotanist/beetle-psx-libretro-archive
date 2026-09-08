@@ -8873,6 +8873,274 @@ static void renderer_hazard(Renderer *self, StatusFlags flags)
    commandbuffer_barrier_simple(cbh_get(&self->cmd), src_stages, src_access, dst_stages, dst_access);
 }
 
+static uint32_t renderer_diag_hash_words(const uint32_t *words, unsigned count)
+{
+   uint32_t hash = 2166136261u;
+   unsigned i;
+   for (i = 0; i < count; i++)
+   {
+      hash ^= words[i];
+      hash *= 16777619u;
+   }
+   return hash;
+}
+
+static uint32_t renderer_diag_pack_rgba8(uint32_t rgba8)
+{
+   uint32_t r = (rgba8 >> 0) & 0xffu;
+   uint32_t g = (rgba8 >> 8) & 0xffu;
+   uint32_t b = (rgba8 >> 16) & 0xffu;
+   uint32_t a = (rgba8 >> 24) & 0xffu;
+   uint32_t r10 = r << 2;
+   uint32_t g10 = g << 2;
+   uint32_t b10 = b << 2;
+   return ((r10 >> 5) << 0) | ((g10 >> 5) << 5) |
+         ((b10 >> 5) << 10) | ((a >= 128u) << 15) |
+         ((r10 & 31u) << 16) | ((g10 & 31u) << 21) |
+         ((b10 & 31u) << 26);
+}
+
+static float renderer_diag_half_to_float(uint16_t half)
+{
+   unsigned sign = half >> 15;
+   unsigned exponent = (half >> 10) & 31u;
+   unsigned mantissa = half & 1023u;
+   float value;
+
+   if (exponent == 0)
+      value = ldexpf((float)mantissa, -24);
+   else if (exponent == 31)
+      value = mantissa ? NAN : INFINITY;
+   else
+      value = ldexpf((float)(mantissa + 1024u), (int)exponent - 25);
+   return sign ? -value : value;
+}
+
+static unsigned renderer_diag_quantize_10(float value)
+{
+   if (isnan(value) || value <= 0.0f)
+      return 0;
+   if (value >= 1.0f)
+      return 1020;
+   return (unsigned)floorf(value * 1020.0f + 0.5f);
+}
+
+static uint32_t renderer_diag_pack_source(const Renderer *self,
+      const uint32_t *source, unsigned pixel)
+{
+   if (self->scaled_fb_format == VK_FORMAT_R8G8B8A8_UNORM)
+      return renderer_diag_pack_rgba8(source[pixel]);
+   else
+   {
+      const uint16_t *half = (const uint16_t *)source + pixel * 4;
+      unsigned r10 = renderer_diag_quantize_10(
+            renderer_diag_half_to_float(half[0]));
+      unsigned g10 = renderer_diag_quantize_10(
+            renderer_diag_half_to_float(half[1]));
+      unsigned b10 = renderer_diag_quantize_10(
+            renderer_diag_half_to_float(half[2]));
+      float alpha = renderer_diag_half_to_float(half[3]);
+      return ((r10 >> 5) << 0) | ((g10 >> 5) << 5) |
+            ((b10 >> 5) << 10) | ((alpha >= 0.5f) << 15) |
+            ((r10 & 31u) << 16) | ((g10 & 31u) << 21) |
+            ((b10 & 31u) << 26);
+   }
+}
+
+static void renderer_diag_copy_index_sources(Renderer *self,
+      uint32_t *native_words, uint32_t *scaled_pixels)
+{
+   BufferCreateInfo info;
+   BufferHandle native_buffer;
+   BufferHandle scaled_buffer;
+   Fence fence;
+   VkOffset3D native_offset = { 416, 416, 0 };
+   VkOffset3D scaled_offset = { 832, 832, 0 };
+   VkExtent3D native_extent = { 16, 32, 1 };
+   VkExtent3D scaled_extent = { 32, 64, 1 };
+   VkImageSubresourceLayers subresource = {
+      VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1
+   };
+   const Image *native = ih_get(&self->framebuffer);
+   const Image *scaled = ih_get(&self->scaled_framebuffer);
+   const uint32_t *mapped;
+
+   info.domain = BufferDomain_CachedHost;
+   info.size = 16 * 32 * sizeof(uint32_t);
+   info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+   native_buffer = device_create_buffer(self->device, &info, NULL);
+   info.size = 32 * 64 *
+         (self->scaled_fb_format == VK_FORMAT_R8G8B8A8_UNORM ? 4 : 8);
+   scaled_buffer = device_create_buffer(self->device, &info, NULL);
+
+   renderer_ensure_command_buffer(self);
+   commandbuffer_image_barrier(cbh_get(&self->cmd), native,
+         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+   commandbuffer_image_barrier(cbh_get(&self->cmd), scaled,
+         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+   commandbuffer_copy_image_to_buffer(cbh_get(&self->cmd),
+         bh_get(&native_buffer), native, 0, &native_offset, &native_extent,
+         0, 0, &subresource);
+   commandbuffer_copy_image_to_buffer(cbh_get(&self->cmd),
+         bh_get(&scaled_buffer), scaled, 0, &scaled_offset, &scaled_extent,
+         0, 0, &subresource);
+   commandbuffer_image_barrier(cbh_get(&self->cmd), native,
+         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+         VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+   commandbuffer_image_barrier(cbh_get(&self->cmd), scaled,
+         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+         VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+   commandbuffer_barrier_simple(cbh_get(&self->cmd),
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+         VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+
+   fence = renderer_flush_and_signal(self);
+   fenceholder_wait(fence_get(&fence));
+   mapped = (const uint32_t *)device_map_host_buffer(self->device,
+         bh_get(&native_buffer), MEMORY_ACCESS_READ_BIT);
+   memcpy(native_words, mapped, 16 * 32 * sizeof(uint32_t));
+   device_unmap_host_buffer(self->device, bh_get(&native_buffer),
+         MEMORY_ACCESS_READ_BIT);
+   mapped = (const uint32_t *)device_map_host_buffer(self->device,
+         bh_get(&scaled_buffer), MEMORY_ACCESS_READ_BIT);
+   memcpy(scaled_pixels, mapped, 32 * 64 * sizeof(uint32_t));
+   device_unmap_host_buffer(self->device, bh_get(&scaled_buffer),
+         MEMORY_ACCESS_READ_BIT);
+   fence_reset(&fence);
+   bh_reset(&native_buffer);
+   bh_reset(&scaled_buffer);
+}
+
+static void renderer_diag_copy_index_result(Renderer *self,
+      uint32_t *native_words)
+{
+   BufferCreateInfo info;
+   BufferHandle buffer;
+   Fence fence;
+   VkOffset3D offset = { 416, 416, 0 };
+   VkExtent3D extent = { 16, 32, 1 };
+   VkImageSubresourceLayers subresource = {
+      VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1
+   };
+   const Image *native = ih_get(&self->framebuffer);
+   const uint32_t *mapped;
+
+   info.domain = BufferDomain_CachedHost;
+   info.size = 16 * 32 * sizeof(uint32_t);
+   info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+   buffer = device_create_buffer(self->device, &info, NULL);
+
+   commandbuffer_image_barrier(cbh_get(&self->cmd), native,
+         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+   commandbuffer_copy_image_to_buffer(cbh_get(&self->cmd), bh_get(&buffer),
+         native, 0, &offset, &extent, 0, 0, &subresource);
+   commandbuffer_image_barrier(cbh_get(&self->cmd), native,
+         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+         VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+   commandbuffer_barrier_simple(cbh_get(&self->cmd),
+         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+         VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_HOST_READ_BIT);
+
+   fence = renderer_flush_and_signal(self);
+   fenceholder_wait(fence_get(&fence));
+   mapped = (const uint32_t *)device_map_host_buffer(self->device,
+         bh_get(&buffer), MEMORY_ACCESS_READ_BIT);
+   memcpy(native_words, mapped, 16 * 32 * sizeof(uint32_t));
+   device_unmap_host_buffer(self->device, bh_get(&buffer),
+         MEMORY_ACCESS_READ_BIT);
+   fence_reset(&fence);
+   bh_reset(&buffer);
+}
+
+static void renderer_diag_report_index_resolve(const Renderer *self,
+      unsigned sequence,
+      const uint32_t *before, const uint32_t *scaled, const uint32_t *after)
+{
+   unsigned phase_before[4] = { 0, 0, 0, 0 };
+   unsigned phase_after[4] = { 0, 0, 0, 0 };
+   unsigned changed = 0;
+   unsigned uniform = 0;
+   unsigned i, phase;
+
+   for (i = 0; i < 16 * 32; i++)
+   {
+      unsigned x = i & 15u;
+      unsigned y = i >> 4;
+      uint32_t packed[4];
+      if (before[i] != after[i])
+         changed++;
+      for (phase = 0; phase < 4; phase++)
+      {
+         unsigned px = phase & 1u;
+         unsigned py = phase >> 1;
+         packed[phase] = renderer_diag_pack_source(self, scaled,
+               (y * 2 + py) * 32 + x * 2 + px);
+         if (packed[phase] == before[i])
+            phase_before[phase]++;
+         if (packed[phase] == after[i])
+            phase_after[phase]++;
+      }
+      if (packed[0] == packed[1] && packed[0] == packed[2] &&
+          packed[0] == packed[3])
+         uniform++;
+   }
+
+   if (!log_cb)
+      return;
+
+   log_cb(RETRO_LOG_INFO,
+         "[VK_INDEX_DATA] seq=%u format=%s before=%08x scaled=%08x after=%08x "
+         "changed=%u uniform=%u p_before=%u,%u,%u,%u "
+         "p_after=%u,%u,%u,%u\n",
+         sequence,
+         self->scaled_fb_format == VK_FORMAT_R8G8B8A8_UNORM ? "rgba8" : "rgba16f",
+         renderer_diag_hash_words(before, 16 * 32),
+         renderer_diag_hash_words(scaled,
+               self->scaled_fb_format == VK_FORMAT_R8G8B8A8_UNORM ?
+               32 * 64 : 32 * 64 * 2),
+         renderer_diag_hash_words(after, 16 * 32),
+         changed, uniform,
+         phase_before[0], phase_before[1], phase_before[2], phase_before[3],
+         phase_after[0], phase_after[1], phase_after[2], phase_after[3]);
+
+   for (i = 0; i < 8; i++)
+   {
+      uint32_t packed[4];
+      for (phase = 0; phase < 4; phase++)
+      {
+         unsigned px = phase & 1u;
+         unsigned py = phase >> 1;
+         packed[phase] = renderer_diag_pack_source(self, scaled,
+               (phase >> 1) * 32 + i * 2 + px);
+      }
+      log_cb(RETRO_LOG_INFO,
+            "[VK_INDEX_WORD] seq=%u x=%u before=%08x after=%08x "
+            "phase=%08x,%08x,%08x,%08x\n",
+            sequence, i, before[i], after[i],
+            packed[0], packed[1], packed[2], packed[3]);
+   }
+}
+
 static void renderer_flush_resolves(Renderer *self)
 {
    struct Push
@@ -8909,6 +9177,39 @@ static void renderer_flush_resolves(Renderer *self)
    if (!Rect2DVec_empty(&self->queue.unscaled_resolves))
    {
       unsigned size;
+      static unsigned diag_sequence;
+      bool diag_target = false;
+      bool diag_capture = false;
+      unsigned diag_id = 0;
+      uint32_t diag_before[16 * 32];
+      uint32_t diag_scaled[32 * 64 * 2];
+      uint32_t diag_after[16 * 32];
+
+      size = Rect2DVec_size(&self->queue.unscaled_resolves);
+      if (self->scaling == 2 && self->msaa == 1 &&
+          (self->scaled_fb_format == VK_FORMAT_R8G8B8A8_UNORM ||
+           self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT))
+      {
+         unsigned i;
+         for (i = 0; i < size; i++)
+         {
+            const VkRect2D *rect = Rect2DVec_at(
+                  &self->queue.unscaled_resolves, i);
+            if (rect->offset.x == 416 && rect->offset.y == 416)
+            {
+               diag_target = true;
+               break;
+            }
+         }
+      }
+      if (diag_target)
+      {
+         diag_id = diag_sequence++;
+         diag_capture = diag_id < 4 || (diag_id & (diag_id - 1)) == 0;
+         if (diag_capture)
+            renderer_diag_copy_index_sources(self, diag_before, diag_scaled);
+      }
+
       renderer_ensure_command_buffer(self);
       /* Always use nearest neighbor downscaling to avoid filter artifact (e.g.
        * unwanted black outlines in Vagrant Story) Supersampling will use a
@@ -8923,7 +9224,6 @@ static void renderer_flush_resolves(Renderer *self)
       else
          commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 1, iv_get(imageview_vec_at(&self->scaled_views, 0)), StockSampler_NearestClamp);
 
-      size = Rect2DVec_size(&self->queue.unscaled_resolves);
       { unsigned i; for (i = 0; i < size; i += 1024) {
          void * ptr;
          unsigned to_run = min_(size - i, 1024u);
@@ -8935,6 +9235,13 @@ static void renderer_flush_resolves(Renderer *self)
          commandbuffer_set_specialization_constant_mask(cbh_get(&self->cmd), -1);
          commandbuffer_dispatch(cbh_get(&self->cmd), 1, 1, to_run);
       } }
+
+      if (diag_capture)
+      {
+         renderer_diag_copy_index_result(self, diag_after);
+         renderer_diag_report_index_resolve(self, diag_id, diag_before,
+               diag_scaled, diag_after);
+      }
    }
 
    Rect2DVec_clear(&self->queue.scaled_resolves);
