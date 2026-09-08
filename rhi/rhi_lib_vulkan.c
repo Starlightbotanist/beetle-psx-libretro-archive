@@ -7181,6 +7181,22 @@ static void renderer_clear_rect(Renderer *self,
       const TTRect *rect,
       uint32_t fb_color)
 {
+   if (log_cb)
+   {
+      static unsigned record_count;
+      const TTRect source_target = { 480, 256, 16, 32 };
+
+      if (record_count < 4096 && rect_intersects(rect, &source_target))
+      {
+         log_cb(RETRO_LOG_INFO,
+               "[VK_INDEX_TRANSFER] record=%u op=fill rect=%u,%u %ux%u color=%08x feedback_before=%u\n",
+               record_count++, rect->x, rect->y, rect->width, rect->height,
+               fb_color, (unsigned)vram_prov_any(self,
+                  (int)source_target.x, (int)source_target.y,
+                  (int)source_target.width, (int)source_target.height));
+      }
+   }
+
    if (self->texture_tracking_enabled) {
       /* fb_color is 0x00BBGGRR (8-bit channels, low 3 bits ignored). Pack to
        * ABGR1555 (R in the low bits, mask/alpha bit cleared) to match how the
@@ -10291,8 +10307,35 @@ static void renderer_blit_vram(Renderer *self,
       const TTRect *dst,
       const TTRect *src){
    Domain domain;
+   unsigned diag_record = ~0u;
    VK_ASSERT(dst->width == src->width);
    VK_ASSERT(dst->height == src->height);
+
+   if (log_cb)
+   {
+      static unsigned record_count;
+      const TTRect source_target = { 480, 256, 16, 32 };
+
+      if (record_count < 4096 && rect_intersects(dst, &source_target))
+      {
+         diag_record = record_count++;
+         log_cb(RETRO_LOG_INFO,
+               "[VK_INDEX_TRANSFER] record=%u op=blit dst=%u,%u %ux%u src=%u,%u %ux%u same=%u empty=%u overlap=%u mask=%u force=%u dst_feedback_before=%u src_feedback=%u\n",
+               diag_record,
+               dst->x, dst->y, dst->width, dst->height,
+               src->x, src->y, src->width, src->height,
+               (unsigned)rect_eq(dst, src),
+               (unsigned)(dst->width == 0 || dst->height == 0),
+               (unsigned)rect_intersects(dst, src),
+               (unsigned)self->render_state.mask_test,
+               (unsigned)self->render_state.force_mask_bit,
+               (unsigned)vram_prov_any(self, (int)dst->x, (int)dst->y,
+                  (int)dst->width, (int)dst->height),
+               (unsigned)vram_prov_any(self, (int)src->x, (int)src->y,
+                  (int)src->width, (int)src->height));
+      }
+   }
+
    /* Conservative provenance: the destination may now hold GPU-rendered
     * content whether or not the source blocks were marked. */
    vram_prov_op(self, (int)dst->x, (int)dst->y,
@@ -10312,6 +10355,11 @@ static void renderer_blit_vram(Renderer *self,
 #endif
    ih_reset(&self->last_scanout);
    domain = fbatlas_blit_vram(&self->atlas, dst, src);
+
+   if (diag_record != ~0u)
+      log_cb(RETRO_LOG_INFO,
+            "[VK_INDEX_TRANSFER] record=%u op=blit-domain domain=%u\n",
+            diag_record, (unsigned)domain);
 
    if (self->texture_tracking_enabled) {
       texture_tracker_blit(self->tracker, *dst, *src);
@@ -20974,6 +21022,46 @@ void rhi_vulkan_load_image(
       uint16_t *vram,
       bool mask_test, bool set_mask)
 {
+   if (log_cb && renderer)
+   {
+      static unsigned record_count;
+      const TTRect source_target = { 480, 256, 16, 32 };
+      const TTRect upload = { x, y, w, h };
+
+      if (record_count < 4096 && rect_intersects(&upload, &source_target))
+      {
+         uint32_t hash = 2166136261u;
+         uint32_t row_hash[4] = { 2166136261u, 2166136261u,
+               2166136261u, 2166136261u };
+         unsigned ty;
+
+         for (ty = 0; ty < source_target.height; ty++)
+         {
+            unsigned tx;
+            for (tx = 0; tx < source_target.width; tx++)
+            {
+               uint16_t word = vram[(source_target.y + ty) * FB_WIDTH +
+                     source_target.x + tx];
+               hash = (hash ^ word) * 16777619u;
+               if ((ty & 7u) == 0)
+               {
+                  unsigned row = ty >> 3;
+                  row_hash[row] = (row_hash[row] ^ word) * 16777619u;
+               }
+            }
+         }
+
+         log_cb(RETRO_LOG_INFO,
+               "[VK_INDEX_TRANSFER] record=%u op=upload rect=%u,%u %ux%u mask=%u force=%u hash=%08x rows=%08x,%08x,%08x,%08x feedback_before=%u\n",
+               record_count++, x, y, w, h, (unsigned)mask_test,
+               (unsigned)set_mask, hash, row_hash[0], row_hash[1],
+               row_hash[2], row_hash[3],
+               (unsigned)vram_prov_any(renderer,
+                  (int)source_target.x, (int)source_target.y,
+                  (int)source_target.width, (int)source_target.height));
+      }
+   }
+
    if (!renderer)
    {
       /* Pre-context_reset uploads (e.g. savestate-load arriving before
