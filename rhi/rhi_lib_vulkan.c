@@ -9143,7 +9143,16 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
     * the retained copy (uPalette) instead of VRAM. Set right after
     * renderer_allocate_depth, which is what resolves it for this draw. */
    if (shift != 0 && self->atlas.palette_cache_saved)
-      param = (int16_t)(param | 0x1000);
+   {
+      static unsigned retained_bypass_count;
+      if (retained_bypass_count < 64 || !(retained_bypass_count & 511))
+         fprintf(stderr, "[VK_LAVA_CLUT] bypass=%u mode=%u pal=%u,%u tex=%u,%u %ux%u\n",
+               retained_bypass_count, (unsigned)self->render_state.texture_mode,
+               self->render_state.palette_offset_x, self->render_state.palette_offset_y,
+               (unsigned)hd_texture_vram.x, (unsigned)hd_texture_vram.y,
+               (unsigned)hd_texture_vram.width, (unsigned)hd_texture_vram.height);
+      retained_bypass_count++;
+   }
    if (hd_texture_vram.height > 0) { /* This condition is just a dumb way to check that the rect was actually set to something */
       bool fastpath_capable_out = false;
       bool cache_hit = false;
