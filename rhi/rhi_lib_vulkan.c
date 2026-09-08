@@ -9139,7 +9139,7 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
          bool palette_rendered = fbatlas_texture_rendered(&self->atlas, &palette_rect);
 
          scaled_read = texture_rendered || palette_rendered;
-         native_index_read = !texture_rendered && palette_rendered;
+         native_index_read = palette_rendered;
       }
       else
          scaled_read = false;
