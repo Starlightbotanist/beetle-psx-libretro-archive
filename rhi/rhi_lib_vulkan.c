@@ -9143,7 +9143,16 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
     * the retained copy (uPalette) instead of VRAM. Set right after
     * renderer_allocate_depth, which is what resolves it for this draw. */
    if (shift != 0 && self->atlas.palette_cache_saved)
-      param = (int16_t)(param | 0x1000);
+   {
+      static unsigned retained_palette_bypasses;
+      if (log_cb && retained_palette_bypasses < 64)
+         log_cb(RETRO_LOG_INFO,
+               "[VK_LAVA_CACHE_BYPASS] pal=%u,%u mode=%u\n",
+               self->render_state.palette_offset_x,
+               self->render_state.palette_offset_y,
+               (unsigned)self->render_state.texture_mode);
+      retained_palette_bypasses++;
+   }
    if (hd_texture_vram.height > 0) { /* This condition is just a dumb way to check that the rect was actually set to something */
       bool fastpath_capable_out = false;
       bool cache_hit = false;
@@ -18922,10 +18931,11 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
 
             if (log_cb && forced_palette_resolves < 64)
                log_cb(RETRO_LOG_INFO,
-                     "[VK_LAVA_FORCE_RESOLVE] pal=%u,%u %ux%u first_status=0x%04x\n",
+                     "[VK_LAVA_FORCE_RESOLVE] pal=%u,%u %ux%u first_status=0x%04x cached=%u\n",
                      palette_rect.x, palette_rect.y,
                      palette_rect.width, palette_rect.height,
-                     (unsigned)*fbatlas_info(self, xbegin, y));
+                     (unsigned)*fbatlas_info(self, xbegin, y),
+                     self->palette_cache_saved);
             forced_palette_resolves++;
 
             for (x = xbegin; x <= xend; x++)
