@@ -9127,7 +9127,30 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    else
    {
       filtering = self->render_state.texture_mode != TextureMode_None;
-      scaled_read = self->render_state.texture_mode != TextureMode_None;
+      if (self->render_state.texture_mode != TextureMode_None)
+      {
+         TTRect palette_rect = {
+            self->render_state.palette_offset_x,
+            self->render_state.palette_offset_y,
+            self->render_state.texture_mode == TextureMode_Palette8bpp ? 256u : 16u,
+            1
+         };
+         bool texture_rendered = fbatlas_texture_rendered(&self->atlas, &hd_texture_vram);
+         bool palette_rendered = fbatlas_texture_rendered(&self->atlas, &palette_rect);
+         static unsigned scaled_indexed_count;
+
+         scaled_read = texture_rendered || palette_rendered;
+         if (scaled_read && (scaled_indexed_count < 128 || !(scaled_indexed_count & 1023)))
+            fprintf(stderr, "[VK_LAVA_DOMAIN] scaled=%u texture=%u palette=%u draw=%u,%u %ux%u tex=%u,%u %ux%u pal=%u,%u\n",
+                  scaled_indexed_count, texture_rendered, palette_rendered,
+                  rect.x, rect.y, rect.width, rect.height,
+                  hd_texture_vram.x, hd_texture_vram.y,
+                  hd_texture_vram.width, hd_texture_vram.height,
+                  palette_rect.x, palette_rect.y);
+         scaled_indexed_count++;
+      }
+      else
+         scaled_read = false;
    }
    offset_uv = self->scaled_uv_offset && self->render_state.primitive_type == PrimitiveType_Polygon;
 
@@ -18742,16 +18765,20 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
    {
       unsigned xend;
       unsigned xbegin;
+      unsigned width;
+      unsigned height;
       if (rect->width == 0 || rect->height == 0)
          return false;
 
+      width = min_(rect->width, FB_WIDTH);
+      height = min_(rect->height, FB_HEIGHT);
       xbegin = rect->x / BLOCK_WIDTH;
-      xend = (rect->x + rect->width - 1) / BLOCK_WIDTH;
+      xend = (rect->x + width - 1) / BLOCK_WIDTH;
       { unsigned ybegin = rect->y / BLOCK_HEIGHT;
-      unsigned yend = (rect->y + rect->height - 1) / BLOCK_HEIGHT;
+      unsigned yend = (rect->y + height - 1) / BLOCK_HEIGHT;
       { unsigned y; for (y = ybegin; y <= yend; y++)
          { unsigned x; for (x = xbegin; x <= xend; x++)
-            if ((*fbatlas_info(self, x, y)) & STATUS_TEXTURE_RENDERED)
+            if ((*fbatlas_info(self, x % NUM_BLOCKS_X, y % NUM_BLOCKS_Y)) & STATUS_TEXTURE_RENDERED)
                return true; } }
       return false;
       }
