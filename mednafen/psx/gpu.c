@@ -313,6 +313,7 @@ static INLINE void gpu_polygon_subdiv_flush(PS_GPU *gpu)
 
 static void SetTPage(PS_GPU *gpu, const uint32_t cmdw)
 {
+   static unsigned diag_tpage_sequence;
    const unsigned NewTexPageX = (cmdw & 0xF) * 64;
    const unsigned NewTexPageY = (cmdw & 0x10) * 16;
    const unsigned NewTexMode  = (cmdw >> 7) & 0x3;
@@ -321,6 +322,13 @@ static void SetTPage(PS_GPU *gpu, const uint32_t cmdw)
 
    if(!NewTexMode != !gpu->TexMode || NewTexPageX != gpu->TexPageX || NewTexPageY != gpu->TexPageY)
    {
+      unsigned diag_id = diag_tpage_sequence++;
+      if (log_cb && (diag_id < 64 || (diag_id & (diag_id - 1)) == 0))
+         log_cb(RETRO_LOG_INFO,
+               "[GPU_TEXCACHE_INVALIDATE] seq=%u reason=tpage "
+               "old=(%u,%u,%u) new=(%u,%u,%u)\n",
+               diag_id, gpu->TexPageX, gpu->TexPageY, gpu->TexMode,
+               NewTexPageX, NewTexPageY, NewTexMode);
       /* Flush any pending subdivision buffer BEFORE mutating
        * TexPageX/Y/TexMode -- the HW subdivision emit callback
        * reads these from gpu state at flush time on the assumption
@@ -441,6 +449,11 @@ GCMD_DRAWPOLY_BMGROUP_ALL(4, 1)
 
 static void Command_ClearCache(PS_GPU* g, const uint32_t *cb)
 {
+   static unsigned diag_clear_sequence;
+   if (log_cb)
+      log_cb(RETRO_LOG_INFO,
+            "[GPU_TEXCACHE_INVALIDATE] clear=%u reason=gp0-clear\n",
+            diag_clear_sequence++);
    InvalidateCache(g);
    rhi_intf_invalidate_clut_cache();
 }

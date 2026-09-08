@@ -9028,12 +9028,13 @@ static void renderer_diag_copy_index_sources(Renderer *self,
 }
 
 static void renderer_diag_copy_index_result(Renderer *self,
-      uint32_t *native_words)
+      uint32_t *native_words, uint32_t *source_words)
 {
    BufferCreateInfo info;
    BufferHandle buffer;
    Fence fence;
    VkOffset3D offset = { 416, 416, 0 };
+   VkOffset3D source_offset = { 480, 256, 0 };
    VkExtent3D extent = { 16, 32, 1 };
    VkImageSubresourceLayers subresource = {
       VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1
@@ -9042,7 +9043,7 @@ static void renderer_diag_copy_index_result(Renderer *self,
    const uint32_t *mapped;
 
    info.domain = BufferDomain_CachedHost;
-   info.size = 16 * 32 * sizeof(uint32_t);
+   info.size = 2 * 16 * 32 * sizeof(uint32_t);
    info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
    buffer = device_create_buffer(self->device, &info, NULL);
 
@@ -9052,6 +9053,9 @@ static void renderer_diag_copy_index_result(Renderer *self,
          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
    commandbuffer_copy_image_to_buffer(cbh_get(&self->cmd), bh_get(&buffer),
          native, 0, &offset, &extent, 0, 0, &subresource);
+   commandbuffer_copy_image_to_buffer(cbh_get(&self->cmd), bh_get(&buffer),
+         native, 16 * 32 * sizeof(uint32_t), &source_offset, &extent,
+         0, 0, &subresource);
    commandbuffer_image_barrier(cbh_get(&self->cmd), native,
          VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
          VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT,
@@ -9066,6 +9070,8 @@ static void renderer_diag_copy_index_result(Renderer *self,
    mapped = (const uint32_t *)device_map_host_buffer(self->device,
          bh_get(&buffer), MEMORY_ACCESS_READ_BIT);
    memcpy(native_words, mapped, 16 * 32 * sizeof(uint32_t));
+   memcpy(source_words, mapped + 16 * 32,
+         16 * 32 * sizeof(uint32_t));
    device_unmap_host_buffer(self->device, bh_get(&buffer),
          MEMORY_ACCESS_READ_BIT);
    fence_reset(&fence);
@@ -9073,19 +9079,26 @@ static void renderer_diag_copy_index_result(Renderer *self,
 }
 
 static void renderer_diag_report_index_resolve(const Renderer *self,
-      unsigned sequence,
-      const uint32_t *before, const uint32_t *scaled, const uint32_t *after)
+      unsigned sequence, const uint32_t *before, const uint32_t *scaled,
+      const uint32_t *after, const uint32_t *source)
 {
    unsigned phase_before[4] = { 0, 0, 0, 0 };
    unsigned phase_after[4] = { 0, 0, 0, 0 };
    unsigned changed = 0;
    unsigned uniform = 0;
+   unsigned mismatches = 0;
+   unsigned mismatch_rows = 0;
+   unsigned mismatch_columns = 0;
+   unsigned mismatch_logged = 0;
    unsigned i, phase;
 
    for (i = 0; i < 16 * 32; i++)
    {
       unsigned x = i & 15u;
       unsigned y = i >> 4;
+      unsigned source_y = (31u + y) & 31u;
+      uint16_t expected = (uint16_t)source[source_y * 16 + x];
+      uint16_t actual = (uint16_t)after[i];
       uint32_t packed[4];
       if (before[i] != after[i])
          changed++;
@@ -9103,6 +9116,22 @@ static void renderer_diag_report_index_resolve(const Renderer *self,
       if (packed[0] == packed[1] && packed[0] == packed[2] &&
           packed[0] == packed[3])
          uniform++;
+      if (actual != expected)
+      {
+         mismatches++;
+         mismatch_rows |= 1u << y;
+         mismatch_columns |= 1u << x;
+         if (log_cb && mismatch_logged < 16)
+         {
+            log_cb(RETRO_LOG_INFO,
+                  "[VK_INDEX_MISMATCH] seq=%u dst=(%u,%u) src=(%u,%u) "
+                  "expected=%04x actual=%04x full=%08x\n",
+                  sequence, 416u + x, 416u + y,
+                  480u + x, 256u + source_y,
+                  expected, actual, after[i]);
+            mismatch_logged++;
+         }
+      }
    }
 
    if (!log_cb)
@@ -9110,7 +9139,8 @@ static void renderer_diag_report_index_resolve(const Renderer *self,
 
    log_cb(RETRO_LOG_INFO,
          "[VK_INDEX_DATA] seq=%u format=%s before=%08x scaled=%08x after=%08x "
-         "changed=%u uniform=%u p_before=%u,%u,%u,%u "
+         "source=%08x changed=%u uniform=%u mismatches=%u "
+         "rows=%08x columns=%04x p_before=%u,%u,%u,%u "
          "p_after=%u,%u,%u,%u\n",
          sequence,
          self->scaled_fb_format == VK_FORMAT_R8G8B8A8_UNORM ? "rgba8" : "rgba16f",
@@ -9119,7 +9149,8 @@ static void renderer_diag_report_index_resolve(const Renderer *self,
                self->scaled_fb_format == VK_FORMAT_R8G8B8A8_UNORM ?
                32 * 64 : 32 * 64 * 2),
          renderer_diag_hash_words(after, 16 * 32),
-         changed, uniform,
+         renderer_diag_hash_words(source, 16 * 32),
+         changed, uniform, mismatches, mismatch_rows, mismatch_columns,
          phase_before[0], phase_before[1], phase_before[2], phase_before[3],
          phase_after[0], phase_after[1], phase_after[2], phase_after[3]);
 
@@ -9184,6 +9215,7 @@ static void renderer_flush_resolves(Renderer *self)
       uint32_t diag_before[16 * 32];
       uint32_t diag_scaled[32 * 64 * 2];
       uint32_t diag_after[16 * 32];
+      uint32_t diag_source[16 * 32];
 
       size = Rect2DVec_size(&self->queue.unscaled_resolves);
       if (self->scaling == 2 && self->msaa == 1 &&
@@ -9238,9 +9270,9 @@ static void renderer_flush_resolves(Renderer *self)
 
       if (diag_capture)
       {
-         renderer_diag_copy_index_result(self, diag_after);
+         renderer_diag_copy_index_result(self, diag_after, diag_source);
          renderer_diag_report_index_resolve(self, diag_id, diag_before,
-               diag_scaled, diag_after);
+               diag_scaled, diag_after, diag_source);
       }
    }
 
@@ -9583,6 +9615,56 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    }
    if (self->render_state.primitive_dither)
       param = (int16_t)((uint16_t)param | 0x8000u);
+
+   if (shift != 0 && hd_texture_vram.width && hd_texture_vram.height &&
+       hd_texture_vram.x < 432 &&
+       hd_texture_vram.x + hd_texture_vram.width > 416 &&
+       hd_texture_vram.y < 448 &&
+       hd_texture_vram.y + hd_texture_vram.height > 416)
+   {
+      static unsigned diag_index_draw;
+      unsigned diag_id = diag_index_draw++;
+      if (log_cb && (diag_id < 16 || (diag_id & (diag_id - 1)) == 0))
+      {
+         unsigned i;
+         log_cb(RETRO_LOG_INFO,
+               "[VK_INDEX_DRAW] seq=%u mode=%u tex=(%u,%u %ux%u) "
+               "dst=(%u,%u %ux%u) pal=(%u,%u) cache=%u/%u@(%u,%u,%u) "
+               "window=(%02x,%02x,%02x,%02x) limits=(%u,%u,%u,%u) "
+               "scaled=%u filter=%u mod=%u dither=%u param=%04x\n",
+               diag_id, shift,
+               (unsigned)hd_texture_vram.x, (unsigned)hd_texture_vram.y,
+               (unsigned)hd_texture_vram.width,
+               (unsigned)hd_texture_vram.height,
+               (unsigned)rect.x, (unsigned)rect.y,
+               (unsigned)rect.width, (unsigned)rect.height,
+               self->render_state.palette_offset_x,
+               self->render_state.palette_offset_y,
+               self->atlas.palette_cache_valid,
+               self->atlas.palette_cache_saved,
+               self->atlas.palette_cache_x,
+               self->atlas.palette_cache_y,
+               self->atlas.palette_cache_mode,
+               self->render_state.texture_window.mask_x,
+               self->render_state.texture_window.mask_y,
+               self->render_state.texture_window.or_x,
+               self->render_state.texture_window.or_y,
+               self->render_state.UVLimits.min_u,
+               self->render_state.UVLimits.min_v,
+               self->render_state.UVLimits.max_u,
+               self->render_state.UVLimits.max_v,
+               scaled_read, filtering,
+               self->render_state.texture_color_modulate,
+               self->render_state.primitive_dither,
+               (unsigned)(uint16_t)param);
+         for (i = 0; i < count; i++)
+            log_cb(RETRO_LOG_INFO,
+                  "[VK_INDEX_DRAW_VERTEX] seq=%u i=%u pos=(%.3f,%.3f) "
+                  "uv=(%u,%u) w=%.9g\n",
+                  diag_id, i, vertices[i].x, vertices[i].y,
+                  vertices[i].u, vertices[i].v, vertices[i].w);
+      }
+   }
 
    { unsigned i; for (i = 0; i < count; i++) {
       output[i].x = x[i];
