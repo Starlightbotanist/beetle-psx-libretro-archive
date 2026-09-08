@@ -9140,9 +9140,12 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
          static unsigned scaled_indexed_count;
 
          scaled_read = texture_rendered || palette_rendered;
-         if (scaled_read && (scaled_indexed_count < 128 || !(scaled_indexed_count & 1023)))
-            fprintf(stderr, "[VK_LAVA_DOMAIN] scaled=%u texture=%u palette=%u draw=%u,%u %ux%u tex=%u,%u %ux%u pal=%u,%u\n",
-                  scaled_indexed_count, texture_rendered, palette_rendered,
+         if (scaled_read && log_cb &&
+             (scaled_indexed_count < 2048 || !(scaled_indexed_count & 4095)))
+            log_cb(RETRO_LOG_INFO,
+                  "[VK_LAVA_DOMAIN] scaled=%u mode=%u texture=%u palette=%u draw=%u,%u %ux%u tex=%u,%u %ux%u pal=%u,%u\n",
+                  scaled_indexed_count, (unsigned)self->render_state.texture_mode,
+                  texture_rendered, palette_rendered,
                   rect.x, rect.y, rect.width, rect.height,
                   hd_texture_vram.x, hd_texture_vram.y,
                   hd_texture_vram.width, hd_texture_vram.height,
