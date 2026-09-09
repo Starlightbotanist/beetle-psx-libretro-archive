@@ -177,6 +177,7 @@ extern "C" {
 
 void CPU_AssertIRQ(unsigned which, bool asserted);
 void CPU_SetHalt(bool status);
+bool CPU_HasDirectMemoryAccess(void);
 
 #ifdef HAVE_LIGHTREC
 void CPU_LightrecClear(uint32_t addr, uint32_t size);

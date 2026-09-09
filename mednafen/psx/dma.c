@@ -135,6 +135,13 @@ static INLINE bool ChCan(const unsigned ch, const uint32_t CRModeCache)
    return false;
 }
 
+bool DMA_CPUReadBlocked(void)
+{
+   return (DMACH[CH_GPU].ChanControl & (1U << 24)) &&
+          (DMACH[CH_GPU].ChanControl & 0x701) == 0x201 &&
+          (DMACH[CH_GPU].WordCounter || GPU_DMACanWrite());
+}
+
 static void RecalcHalt(void)
 {
    bool Halt    = false;
@@ -173,9 +180,7 @@ static void RecalcHalt(void)
       Halt = true;
 #endif
 
-   if((DMACH[CH_GPU].ChanControl & (1U << 24)) &&
-      (DMACH[CH_GPU].ChanControl & 0x701) == 0x201 &&
-      (DMACH[CH_GPU].WordCounter || GPU_DMACanWrite()))
+   if(CPU_HasDirectMemoryAccess() && DMA_CPUReadBlocked())
       Halt = true;
 
    if(!Halt && (DMACH[2].ChanControl & (1U << 24)) && ((DMACH[2].ChanControl & 0x700) == 0x200) && ChCan(2, DMACH[2].ChanControl))

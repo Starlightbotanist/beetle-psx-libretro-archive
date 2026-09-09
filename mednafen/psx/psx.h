@@ -17,6 +17,7 @@
 #include "../video/surface.h"
 
 bool MDFN_FASTCALL PSX_EventHandler(const int32_t timestamp);
+void PSX_CPUReadStall(int32_t *timestamp);
 
 void MDFN_FASTCALL PSX_MemWrite8 (int32_t timestamp, uint32_t A, uint32_t V);
 void MDFN_FASTCALL PSX_MemWrite16(int32_t timestamp, uint32_t A, uint32_t V);

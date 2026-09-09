@@ -312,6 +312,15 @@ void CPU_SetHalt(bool status)
    CPU_SetHalt_method(PSX_CPU, status);
 }
 
+bool CPU_HasDirectMemoryAccess(void)
+{
+#ifdef HAVE_LIGHTREC
+   return psx_dynarec != DYNAREC_DISABLED;
+#else
+   return false;
+#endif
+}
+
 #ifdef HAVE_LIGHTREC
 void CPU_LightrecClear(uint32_t addr, uint32_t size)
 {
@@ -745,6 +754,8 @@ static INLINE uint32_t ReadInstruction(int32_t *timestamp, uint32_t address)
    {
       ReadAbsorb[ReadAbsorbWhich] = 0;
       ReadAbsorbWhich             = 0;
+
+      PSX_CPUReadStall(timestamp);
 
       if (address >= 0xA0000000 || !(BIU & 0x800))
       {

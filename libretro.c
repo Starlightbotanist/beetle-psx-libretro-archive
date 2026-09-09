@@ -1534,6 +1534,20 @@ bool MDFN_FASTCALL PSX_EventHandler(const int32_t timestamp)
    return(Running);
 }
 
+void PSX_CPUReadStall(int32_t *timestamp)
+{
+   while(DMA_CPUReadBlocked())
+   {
+      const int32_t event_timestamp = CPU_GetEventNT();
+
+      if(event_timestamp > *timestamp)
+         *timestamp = event_timestamp;
+
+      if(!PSX_EventHandler(*timestamp))
+         break;
+   }
+}
+
 void PSX_RequestMLExit(void)
 {
    Running = 0;
@@ -1655,6 +1669,7 @@ void MDFN_FASTCALL PSX_MemWrite32(int32_t timestamp, uint32_t A, uint32_t V)
 uint8_t MDFN_FASTCALL PSX_MemRead8(int32_t *timestamp, uint32_t A)
 {
    uint32_t V = 0;
+   PSX_CPUReadStall(timestamp);
    *timestamp += DMACycleSteal;
    if(A < 0x00800000)
    {
@@ -1705,6 +1720,7 @@ uint8_t MDFN_FASTCALL PSX_MemRead8(int32_t *timestamp, uint32_t A)
 uint16_t MDFN_FASTCALL PSX_MemRead16(int32_t *timestamp, uint32_t A)
 {
    uint32_t V = 0;
+   PSX_CPUReadStall(timestamp);
    *timestamp += DMACycleSteal;
    if(A < 0x00800000)
    {
@@ -1764,6 +1780,7 @@ uint16_t MDFN_FASTCALL PSX_MemRead16(int32_t *timestamp, uint32_t A)
 uint32_t MDFN_FASTCALL PSX_MemRead24(int32_t *timestamp, uint32_t A)
 {
    uint32_t V = 0;
+   PSX_CPUReadStall(timestamp);
    *timestamp += DMACycleSteal;
    if(A < 0x00800000)
    {
@@ -1817,6 +1834,7 @@ uint32_t MDFN_FASTCALL PSX_MemRead24(int32_t *timestamp, uint32_t A)
 uint32_t MDFN_FASTCALL PSX_MemRead32(int32_t *timestamp, uint32_t A)
 {
    uint32_t V = 0;
+   PSX_CPUReadStall(timestamp);
    *timestamp += DMACycleSteal;
    if(A < 0x00800000)
    {
