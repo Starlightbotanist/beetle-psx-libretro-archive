@@ -936,6 +936,7 @@ struct gl_vram_sync_tile
    /* Pixels whose current contents originated from GPU rendering. Unlike
     * pending writers, this provenance survives synchronization and frames. */
    uint64_t gpu_written_mask;
+   uint64_t scaled_dirty_mask;
 };
 
 
@@ -967,6 +968,8 @@ struct gl_renderer {
    gl_texture fb_texture;
    /* Retained copy of the selected CLUT when VRAM overwrites it. */
    gl_texture palette_texture;
+   /* Resolution-matched copy for scaled framebuffer feedback. */
+   gl_texture fb_feedback_texture;
    /* gl_framebuffer used as an output when running draw commands */
    gl_texture fb_out;
 
@@ -1108,6 +1111,8 @@ static void gl_renderer_draw(gl_renderer *renderer);
 static void gl_mirror_fb_out_to_fb_texture(gl_renderer *renderer,
       uint16_t x, uint16_t y, uint16_t w, uint16_t h,
       bool allow_with_software_fb);
+static void gl_snapshot_fb_out(gl_renderer *renderer,
+      unsigned x, unsigned y, unsigned w, unsigned h);
 #endif
 
 #ifdef __cplusplus
@@ -2181,7 +2186,7 @@ static TTRect gl_tt_texture_vram_rect(gl_renderer *r,
       unsigned texpage_x, unsigned texpage_y,
       unsigned min_u, unsigned min_v,
       unsigned max_u, unsigned max_v,
-      unsigned shift)
+      unsigned shift, bool hd_texture)
 {
    TTRect out = make_rect(0, 0, 0, 0);
    if (r->tex_x_mask == 0xffu && r->tex_y_mask == 0xffu)
@@ -2199,13 +2204,15 @@ static TTRect gl_tt_texture_vram_rect(gl_renderer *r,
       {
          unsigned width;
          min_u >>= shift;
-         max_u = (max_u + (1u << shift) - 1) >> shift;
+         if (hd_texture)
+            max_u = (max_u + (1u << shift) - 1) >> shift;
+         else
+            max_u >>= shift;
          width = max_u - min_u + 1;
          out.x = texpage_x + min_u;
          out.y = texpage_y + min_v;
-         /* -1 due to the boundary rounding above (see the Vulkan
-          * counterpart's HDTODO note). */
-         out.width = width - 1;
+         /* HD bounds retain the Vulkan tracker's boundary convention. */
+         out.width = hd_texture ? width - 1 : width;
          out.height = height;
       }
    }
@@ -2312,8 +2319,8 @@ static bool gl_vram_sync_rect_is_dirty(gl_renderer *renderer,
    return false;
 }
 
-static bool gl_vram_sync_rect_is_gpu_written(gl_renderer *renderer,
-      unsigned x, unsigned y, unsigned w, unsigned h)
+static bool gl_vram_sync_rect_has_mask(gl_renderer *renderer,
+      unsigned x, unsigned y, unsigned w, unsigned h, bool scaled_dirty)
 {
    unsigned tx0;
    unsigned tx1;
@@ -2341,7 +2348,11 @@ static bool gl_vram_sync_rect_is_gpu_written(gl_renderer *renderer,
          uint64_t read_mask = gl_vram_sync_tile_mask(
                x, y, w, h, raw_tx, raw_ty);
 
-         if (read_mask & renderer->vram_sync.tiles[ty][tx].gpu_written_mask)
+         uint64_t mask = scaled_dirty ?
+               renderer->vram_sync.tiles[ty][tx].scaled_dirty_mask :
+               renderer->vram_sync.tiles[ty][tx].gpu_written_mask;
+
+         if (read_mask & mask)
             return true;
       }
    }
@@ -2378,10 +2389,45 @@ static void gl_vram_sync_update_gpu_written_rect(gl_renderer *renderer,
          uint64_t mask = gl_vram_sync_tile_mask(
                x, y, w, h, raw_tx, raw_ty);
 
+         renderer->vram_sync.tiles[ty][tx].scaled_dirty_mask |= mask;
          if (gpu_written)
             renderer->vram_sync.tiles[ty][tx].gpu_written_mask |= mask;
          else
             renderer->vram_sync.tiles[ty][tx].gpu_written_mask &= ~mask;
+      }
+   }
+}
+
+static void gl_vram_sync_clean_scaled_rect(gl_renderer *renderer,
+      unsigned x, unsigned y, unsigned w, unsigned h)
+{
+   unsigned tx0;
+   unsigned tx1;
+   unsigned ty0;
+   unsigned ty1;
+   unsigned raw_tx;
+   unsigned raw_ty;
+
+   if (!w || !h)
+      return;
+
+   x %= VRAM_WIDTH_PIXELS;
+   y %= VRAM_HEIGHT;
+   tx0 = x / GL_VRAM_SYNC_TILE_SIZE;
+   tx1 = (x + w - 1) / GL_VRAM_SYNC_TILE_SIZE;
+   ty0 = y / GL_VRAM_SYNC_TILE_SIZE;
+   ty1 = (y + h - 1) / GL_VRAM_SYNC_TILE_SIZE;
+
+   for (raw_ty = ty0; raw_ty <= ty1; raw_ty++)
+   {
+      unsigned ty = raw_ty % GL_VRAM_SYNC_TILES_Y;
+      for (raw_tx = tx0; raw_tx <= tx1; raw_tx++)
+      {
+         unsigned tx = raw_tx % GL_VRAM_SYNC_TILES_X;
+         uint64_t mask = gl_vram_sync_tile_mask(
+               x, y, w, h, raw_tx, raw_ty);
+
+         renderer->vram_sync.tiles[ty][tx].scaled_dirty_mask &= ~mask;
       }
    }
 }
@@ -2738,7 +2784,7 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
       TTRect texture_rect = gl_tt_texture_vram_rect(renderer,
             v[0].texture_page[0], v[0].texture_page[1],
             v[0].texture_limits[0], v[0].texture_limits[1],
-            v[0].texture_limits[2], v[0].texture_limits[3], depth);
+            v[0].texture_limits[2], v[0].texture_limits[3], depth, false);
       TTRect producer_rect;
       unsigned clut_width = depth == 1 ? 256u : 16u;
       bool texture_dirty;
@@ -2746,15 +2792,16 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
       bool texture_gpu_written;
       bool clut_gpu_written = false;
       bool clut_cached = false;
+      bool scaled_feedback;
 
       if (texture_rect.height && !texture_rect.width)
          texture_rect.width = 1;
       texture_dirty = gl_vram_sync_get_producer_rect(renderer,
             texture_rect.x, texture_rect.y,
             texture_rect.width, texture_rect.height, &producer_rect);
-      texture_gpu_written = gl_vram_sync_rect_is_gpu_written(renderer,
+      texture_gpu_written = gl_vram_sync_rect_has_mask(renderer,
             texture_rect.x, texture_rect.y,
-            texture_rect.width, texture_rect.height);
+            texture_rect.width, texture_rect.height, false);
       if (depth == 1 || depth == 2)
       {
          clut_cached = renderer->palette_cache_valid &&
@@ -2771,8 +2818,8 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
             renderer->palette_cache_saved = false;
             clut_dirty = gl_vram_sync_rect_is_dirty(renderer,
                   v[0].clut[0], v[0].clut[1], clut_width, 1);
-            clut_gpu_written = gl_vram_sync_rect_is_gpu_written(renderer,
-                  v[0].clut[0], v[0].clut[1], clut_width, 1);
+            clut_gpu_written = gl_vram_sync_rect_has_mask(renderer,
+                  v[0].clut[0], v[0].clut[1], clut_width, 1, false);
             renderer->palette_cache_x = v[0].clut[0];
             renderer->palette_cache_y = v[0].clut[1];
             renderer->palette_cache_depth = (uint8_t)depth;
@@ -2782,24 +2829,52 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
       }
 
       framebuffer_feedback = texture_gpu_written || clut_gpu_written;
+      scaled_feedback = framebuffer_feedback &&
+            renderer->internal_upscaling > 1;
 
       if (texture_dirty || clut_dirty)
       {
-         /* Pending vertices must reach fb_out before their native-resolution
-          * representation can be copied into fb_texture. */
+         /* Pending vertices must reach fb_out before they are copied. */
          if (!gl_draw_buffer_is_empty(renderer->command_buffer))
             gl_renderer_draw(renderer);
 
          if (texture_dirty)
-            gl_vram_sync_mirror_rect(renderer,
-                  producer_rect.x, producer_rect.y,
-                  producer_rect.width, producer_rect.height);
+         {
+            if (scaled_feedback)
+               gl_snapshot_fb_out(renderer,
+                     producer_rect.x, producer_rect.y,
+                     producer_rect.width, producer_rect.height);
+            if (!scaled_feedback || renderer->texture_tracking_enabled)
+               gl_vram_sync_mirror_rect(renderer,
+                     producer_rect.x, producer_rect.y,
+                     producer_rect.width, producer_rect.height);
+         }
 
          /* A texture resolve may already have covered the palette row. */
          if (clut_dirty && gl_vram_sync_rect_is_dirty(renderer,
                v[0].clut[0], v[0].clut[1], clut_width, 1))
             gl_vram_sync_mirror_rect(renderer,
                   v[0].clut[0], v[0].clut[1], clut_width, 1);
+      }
+
+      if (scaled_feedback)
+      {
+         if (gl_vram_sync_rect_has_mask(renderer,
+               texture_rect.x, texture_rect.y,
+               texture_rect.width, texture_rect.height, true))
+            gl_snapshot_fb_out(renderer, texture_rect.x, texture_rect.y,
+                  texture_rect.width, texture_rect.height);
+         if ((depth == 1 || depth == 2) &&
+             !renderer->palette_cache_saved &&
+             gl_vram_sync_rect_has_mask(renderer,
+                  v[0].clut[0], v[0].clut[1], clut_width, 1, true))
+            gl_snapshot_fb_out(renderer,
+                  v[0].clut[0], v[0].clut[1], clut_width, 1);
+
+         if (texture_dirty && !renderer->texture_tracking_enabled)
+            gl_vram_sync_clean_rect(renderer,
+                  producer_rect.x, producer_rect.y,
+                  producer_rect.width, producer_rect.height);
       }
    }
 #endif
@@ -2891,7 +2966,7 @@ static HdTextureHandle gl_tt_query_hd(gl_renderer *r,
          v[0].texture_page[0], v[0].texture_page[1],
          v[0].texture_limits[0], v[0].texture_limits[1],
          v[0].texture_limits[2], v[0].texture_limits[3],
-         shift);
+         shift, true);
    if (vram_rect.height == 0)
       return hd_handle_make_none();
 
@@ -2956,6 +3031,10 @@ static void gl_renderer_draw(gl_renderer *renderer)
       glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "palette_texture"), 2);
       glActiveTexture(GL_TEXTURE2);
       glBindTexture(GL_TEXTURE_2D, renderer->palette_texture.id);
+      glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms,
+               "fb_feedback_texture"), 3);
+      glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms,
+               "feedback_upscaling"), renderer->internal_upscaling);
       glActiveTexture(GL_TEXTURE0);
    }
 
@@ -3574,6 +3653,10 @@ static bool gl_renderer_new(gl_renderer *renderer, gl_draw_config config)
          native_width  * upscaling,
          native_height * upscaling,
          texture_storage);
+
+   if (upscaling > 1)
+      gl_texture_init(&renderer->fb_feedback_texture,
+            renderer->fb_out.width, renderer->fb_out.height, texture_storage);
 
    gl_texture_init(
          &renderer->fb_out_depth,
@@ -4529,6 +4612,11 @@ static void gl_renderer_free(gl_renderer *renderer)
    renderer->palette_texture.width  = 0;
    renderer->palette_texture.height = 0;
 
+   glDeleteTextures(1, &renderer->fb_feedback_texture.id);
+   renderer->fb_feedback_texture.id     = 0;
+   renderer->fb_feedback_texture.width  = 0;
+   renderer->fb_feedback_texture.height = 0;
+
    glDeleteTextures(1, &renderer->fb_out.id);
    renderer->fb_out.id     = 0;
    renderer->fb_out.width  = 0;
@@ -4967,6 +5055,13 @@ static bool retro_refresh_variables(gl_renderer *renderer)
       renderer->fb_out.width  = 0;
       renderer->fb_out.height = 0;
       gl_texture_init(&renderer->fb_out, w, h, texture_storage);
+
+      glDeleteTextures(1, &renderer->fb_feedback_texture.id);
+      renderer->fb_feedback_texture.id     = 0;
+      renderer->fb_feedback_texture.width  = 0;
+      renderer->fb_feedback_texture.height = 0;
+      if (upscaling > 1)
+         gl_texture_init(&renderer->fb_feedback_texture, w, h, texture_storage);
 
       /* This is a bit wasteful since it'll re-upload the data
        * to 'fb_texture' even though we haven't touched it but
@@ -6182,6 +6277,10 @@ void rhi_gl_prepare_frame(void)
 
    glActiveTexture(GL_TEXTURE0);
    glBindTexture(GL_TEXTURE_2D, renderer->fb_texture.id);
+   glActiveTexture(GL_TEXTURE3);
+   glBindTexture(GL_TEXTURE_2D, renderer->fb_feedback_texture.id ?
+         renderer->fb_feedback_texture.id : renderer->fb_texture.id);
+   glActiveTexture(GL_TEXTURE0);
 }
 
 static void compute_vram_framebuffer_dimensions(gl_renderer *renderer)
@@ -7878,6 +7977,61 @@ cleanup:
 
 
 #ifdef GL_READ_FRAMEBUFFER
+static void gl_blit_fb_out(gl_renderer *renderer, gl_texture *dst,
+      unsigned dst_scale, unsigned x, unsigned y, unsigned w, unsigned h)
+{
+   GLboolean scissor_was_enabled;
+   GLint sx, sy, sw, sh;
+   GLint dx, dy, dw, dh;
+
+   if (!w || !h || !dst->id || !gl_caps.fp_glBlitFramebuffer)
+      return;
+
+   sx = (GLint)x * (GLint)renderer->internal_upscaling;
+   sy = (GLint)y * (GLint)renderer->internal_upscaling;
+   sw = (GLint)w * (GLint)renderer->internal_upscaling;
+   sh = (GLint)h * (GLint)renderer->internal_upscaling;
+   dx = (GLint)x * (GLint)dst_scale;
+   dy = (GLint)y * (GLint)dst_scale;
+   dw = (GLint)w * (GLint)dst_scale;
+   dh = (GLint)h * (GLint)dst_scale;
+
+   scissor_was_enabled = glIsEnabled(GL_SCISSOR_TEST);
+
+   glBindFramebuffer(GL_READ_FRAMEBUFFER, renderer->vram_sync_read_fbo);
+#ifdef HAVE_OPENGLES3
+   glFramebufferTexture2D(GL_READ_FRAMEBUFFER,
+         GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, renderer->fb_out.id, 0);
+#else
+   glFramebufferTexture(GL_READ_FRAMEBUFFER,
+         GL_COLOR_ATTACHMENT0, renderer->fb_out.id, 0);
+#endif
+   glReadBuffer(GL_COLOR_ATTACHMENT0);
+
+   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, renderer->vram_sync_draw_fbo);
+#ifdef HAVE_OPENGLES3
+   glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER,
+         GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst->id, 0);
+#else
+   glFramebufferTexture(GL_DRAW_FRAMEBUFFER,
+         GL_COLOR_ATTACHMENT0, dst->id, 0);
+#endif
+
+   if (scissor_was_enabled)
+      glDisable(GL_SCISSOR_TEST);
+
+   gl_caps.fp_glBlitFramebuffer(
+         sx, sy, sx + sw, sy + sh,
+         dx, dy, dx + dw, dy + dh,
+         GL_COLOR_BUFFER_BIT, GL_NEAREST);
+
+   if (scissor_was_enabled)
+      glEnable(GL_SCISSOR_TEST);
+
+   glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+}
+
 /* === Mirror a region of fb_out down into fb_texture ===
  *
  * The GL backend keeps two surfaces:
@@ -7926,76 +8080,60 @@ static void gl_mirror_fb_out_to_fb_texture(gl_renderer *renderer,
                                            uint16_t w, uint16_t h,
                                            bool allow_with_software_fb)
 {
-   GLboolean scissor_was_enabled;
-   GLint     ux;
-   GLint     uy;
-   GLint     uw;
-   GLint     uh;
-   uint32_t  upscale;
-
    if ((!allow_with_software_fb && has_software_fb) ||
        !gl_caps.fp_glBlitFramebuffer)
       return;
 
-   upscale = renderer->internal_upscaling;
-   ux      = (GLint) x * (GLint) upscale;
-   uy      = (GLint) y * (GLint) upscale;
-   uw      = (GLint) w * (GLint) upscale;
-   uh      = (GLint) h * (GLint) upscale;
-
-   scissor_was_enabled = glIsEnabled(GL_SCISSOR_TEST);
-
-   /* Read source: fb_out at upscaled coords. */
-   glBindFramebuffer(GL_READ_FRAMEBUFFER, renderer->vram_sync_read_fbo);
-#ifdef HAVE_OPENGLES3
-   glFramebufferTexture2D(GL_READ_FRAMEBUFFER,
-         GL_COLOR_ATTACHMENT0,
-         GL_TEXTURE_2D,
-         renderer->fb_out.id,
-         0);
-#else
-   glFramebufferTexture(GL_READ_FRAMEBUFFER,
-         GL_COLOR_ATTACHMENT0,
-         renderer->fb_out.id,
-         0);
-#endif
-   glReadBuffer(GL_COLOR_ATTACHMENT0);
-
-   /* Draw target: fb_texture at native coords. */
-   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, renderer->vram_sync_draw_fbo);
-#ifdef HAVE_OPENGLES3
-   glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER,
-         GL_COLOR_ATTACHMENT0,
-         GL_TEXTURE_2D,
-         renderer->fb_texture.id,
-         0);
-#else
-   glFramebufferTexture(GL_DRAW_FRAMEBUFFER,
-         GL_COLOR_ATTACHMENT0,
-         renderer->fb_texture.id,
-         0);
-#endif
-
-   /* glBlitFramebuffer writes through the scissor; disable so we
-    * always cover the full target rect. */
-   if (scissor_was_enabled)
-      glDisable(GL_SCISSOR_TEST);
-
-   gl_caps.fp_glBlitFramebuffer(
-         ux, uy, ux + uw, uy + uh,
-         (GLint) x, (GLint) y, (GLint)(x + w), (GLint)(y + h),
-         GL_COLOR_BUFFER_BIT,
-         GL_NEAREST);
+   gl_blit_fb_out(renderer, &renderer->fb_texture, 1, x, y, w, h);
 
    /* Submit dependency-driven mirrors before following texture fetches. */
    if (allow_with_software_fb)
       glFlush();
+}
 
-   if (scissor_was_enabled)
-      glEnable(GL_SCISSOR_TEST);
+static void gl_copy_fb_out_to_feedback(gl_renderer *renderer,
+      unsigned x, unsigned y, unsigned w, unsigned h)
+{
+   unsigned scale = renderer->internal_upscaling;
 
-   glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
-   glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+   if (gl_caps.fp_glCopyImageSubData)
+      gl_caps.fp_glCopyImageSubData(
+            renderer->fb_out.id, GL_TEXTURE_2D, 0,
+            x * scale, y * scale, 0,
+            renderer->fb_feedback_texture.id, GL_TEXTURE_2D, 0,
+            x * scale, y * scale, 0,
+            w * scale, h * scale, 1);
+   else
+      gl_blit_fb_out(renderer, &renderer->fb_feedback_texture,
+            scale, x, y, w, h);
+}
+
+static void gl_snapshot_fb_out(gl_renderer *renderer,
+      unsigned x, unsigned y, unsigned w, unsigned h)
+{
+   unsigned first_w;
+   unsigned first_h;
+
+   if (!w || !h || !renderer->fb_feedback_texture.id)
+      return;
+
+   x %= VRAM_WIDTH_PIXELS;
+   y %= VRAM_HEIGHT;
+   first_w = w < VRAM_WIDTH_PIXELS - x ? w : VRAM_WIDTH_PIXELS - x;
+   first_h = h < VRAM_HEIGHT - y ? h : VRAM_HEIGHT - y;
+
+   gl_copy_fb_out_to_feedback(renderer, x, y, first_w, first_h);
+   if (w > first_w)
+      gl_copy_fb_out_to_feedback(renderer, 0, y, w - first_w, first_h);
+   if (h > first_h)
+   {
+      gl_copy_fb_out_to_feedback(renderer, x, 0, first_w, h - first_h);
+      if (w > first_w)
+         gl_copy_fb_out_to_feedback(renderer,
+               0, 0, w - first_w, h - first_h);
+   }
+
+   gl_vram_sync_clean_scaled_rect(renderer, x, y, w, h);
 }
 #endif /* GL_READ_FRAMEBUFFER */
 
