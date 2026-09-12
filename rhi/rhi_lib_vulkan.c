@@ -9279,6 +9279,137 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    if (self->render_state.primitive_dither)
       param = (int16_t)((uint16_t)param | 0x8000u);
 
+   /* Diagnostic-only record for the Jumping Flash Level 2 raw framebuffer
+    * writer. Keep the predicate independent of the values under test. */
+   if (log_cb &&
+       self->render_state.texture_mode == TextureMode_ABGR1555 &&
+       rect.x == 416 && rect.y == 416 &&
+       rect.width == 16 && rect.height == 32)
+   {
+      static unsigned lava_window_records;
+      if (lava_window_records < 8)
+      {
+         unsigned record = lava_window_records++;
+         log_cb(RETRO_LOG_INFO,
+               "[VK_LAVA_WINDOW] record=%u count=%u dst=%u,%u %ux%u "
+               "src=%u,%u %ux%u mode=%u shift=%u scaled_read=%u "
+               "filtering=%u scale=%u msaa=%u snapshot=%u failed=%u "
+               "param=%04x primitive=%u raw=%u dither=%u blend=%u "
+               "mask_test=%u set_mask=%u base=%u,%u "
+               "window=%02x,%02x,%02x,%02x limits=%u,%u,%u,%u "
+               "uvw0=%u,%u,%.9g uvw1=%u,%u,%.9g "
+               "uvw2=%u,%u,%.9g uvw3=%u,%u,%.9g\n",
+               record, count,
+               rect.x, rect.y, rect.width, rect.height,
+               hd_texture_vram.x, hd_texture_vram.y,
+               hd_texture_vram.width, hd_texture_vram.height,
+               (unsigned)self->render_state.texture_mode,
+               shift, (unsigned)scaled_read, (unsigned)filtering,
+               self->scaling, self->msaa,
+               (unsigned)ih_is_valid(&self->scaled_read_snapshot),
+               (unsigned)self->scaled_read_snapshot_failed,
+               (unsigned)(uint16_t)param,
+               (unsigned)self->render_state.primitive_type,
+               (unsigned)!self->render_state.texture_color_modulate,
+               (unsigned)self->render_state.primitive_dither,
+               (unsigned)self->render_state.semi_transparent,
+               (unsigned)self->render_state.mask_test,
+               (unsigned)self->render_state.force_mask_bit,
+               self->render_state.texture_offset_x,
+               self->render_state.texture_offset_y,
+               (unsigned)self->render_state.texture_window.mask_x,
+               (unsigned)self->render_state.texture_window.mask_y,
+               (unsigned)self->render_state.texture_window.or_x,
+               (unsigned)self->render_state.texture_window.or_y,
+               (unsigned)self->render_state.UVLimits.min_u,
+               (unsigned)self->render_state.UVLimits.min_v,
+               (unsigned)self->render_state.UVLimits.max_u,
+               (unsigned)self->render_state.UVLimits.max_v,
+               (unsigned)vertices[0].u, (unsigned)vertices[0].v,
+               vertices[0].w,
+               count > 1 ? (unsigned)vertices[1].u : 0u,
+               count > 1 ? (unsigned)vertices[1].v : 0u,
+               count > 1 ? vertices[1].w : 0.0f,
+               count > 2 ? (unsigned)vertices[2].u : 0u,
+               count > 2 ? (unsigned)vertices[2].v : 0u,
+               count > 2 ? vertices[2].w : 0.0f,
+               count > 3 ? (unsigned)vertices[3].u : 0u,
+               count > 3 ? (unsigned)vertices[3].v : 0u,
+               count > 3 ? vertices[3].w : 0.0f);
+      }
+   }
+
+   /* The copied words above are later sampled as indexed texture data. Log
+    * those consumers separately so both adjacent CLUT rows remain visible
+    * even when one row is used much more often than the other. */
+   if (log_cb && shift != 0 &&
+       rect_intersects(&hd_texture_vram,
+            &(TTRect){ 416, 416, 16, 32 }))
+   {
+      static unsigned lava_consumer_records[3];
+      unsigned lane = self->render_state.palette_offset_y == 224 ? 0u :
+            self->render_state.palette_offset_y == 225 ? 1u : 2u;
+      if (lava_consumer_records[lane] < 8)
+      {
+         unsigned record = lava_consumer_records[lane]++;
+         log_cb(RETRO_LOG_INFO,
+               "[VK_LAVA_CONSUMER] lane=%u record=%u count=%u "
+               "dst=%u,%u %ux%u src=%u,%u %ux%u "
+               "mode=%u shift=%u scaled_read=%u filtering=%u "
+               "scale=%u msaa=%u snapshot=%u failed=%u param=%04x "
+               "primitive=%u raw=%u dither=%u blend=%u "
+               "mask_test=%u set_mask=%u base=%u,%u clut=%u,%u "
+               "cache=%u,%u,%u,%u,%u "
+               "window=%02x,%02x,%02x,%02x limits=%u,%u,%u,%u "
+               "uvw0=%u,%u,%.9g uvw1=%u,%u,%.9g "
+               "uvw2=%u,%u,%.9g uvw3=%u,%u,%.9g\n",
+               lane, record, count,
+               rect.x, rect.y, rect.width, rect.height,
+               hd_texture_vram.x, hd_texture_vram.y,
+               hd_texture_vram.width, hd_texture_vram.height,
+               (unsigned)self->render_state.texture_mode,
+               shift, (unsigned)scaled_read, (unsigned)filtering,
+               self->scaling, self->msaa,
+               (unsigned)ih_is_valid(&self->scaled_read_snapshot),
+               (unsigned)self->scaled_read_snapshot_failed,
+               (unsigned)(uint16_t)param,
+               (unsigned)self->render_state.primitive_type,
+               (unsigned)!self->render_state.texture_color_modulate,
+               (unsigned)self->render_state.primitive_dither,
+               (unsigned)self->render_state.semi_transparent,
+               (unsigned)self->render_state.mask_test,
+               (unsigned)self->render_state.force_mask_bit,
+               self->render_state.texture_offset_x,
+               self->render_state.texture_offset_y,
+               self->render_state.palette_offset_x,
+               self->render_state.palette_offset_y,
+               (unsigned)self->atlas.palette_cache_valid,
+               (unsigned)self->atlas.palette_cache_saved,
+               (unsigned)self->atlas.palette_cache_mode,
+               self->atlas.palette_cache_x,
+               self->atlas.palette_cache_y,
+               (unsigned)self->render_state.texture_window.mask_x,
+               (unsigned)self->render_state.texture_window.mask_y,
+               (unsigned)self->render_state.texture_window.or_x,
+               (unsigned)self->render_state.texture_window.or_y,
+               (unsigned)self->render_state.UVLimits.min_u,
+               (unsigned)self->render_state.UVLimits.min_v,
+               (unsigned)self->render_state.UVLimits.max_u,
+               (unsigned)self->render_state.UVLimits.max_v,
+               (unsigned)vertices[0].u, (unsigned)vertices[0].v,
+               vertices[0].w,
+               count > 1 ? (unsigned)vertices[1].u : 0u,
+               count > 1 ? (unsigned)vertices[1].v : 0u,
+               count > 1 ? vertices[1].w : 0.0f,
+               count > 2 ? (unsigned)vertices[2].u : 0u,
+               count > 2 ? (unsigned)vertices[2].v : 0u,
+               count > 2 ? vertices[2].w : 0.0f,
+               count > 3 ? (unsigned)vertices[3].u : 0u,
+               count > 3 ? (unsigned)vertices[3].v : 0u,
+               count > 3 ? vertices[3].w : 0.0f);
+      }
+   }
+
    { unsigned i; for (i = 0; i < count; i++) {
       output[i].x = x[i];
       output[i].y = y[i];
