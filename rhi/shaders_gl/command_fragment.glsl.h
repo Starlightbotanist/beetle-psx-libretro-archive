@@ -1216,7 +1216,12 @@ STRINGIZE(
        * truncates instead; make that conversion explicit. This also keeps
        * filtered framebuffer feedback moving toward zero without reducing
        * the sampling precision used to produce output_rgb. */
-      if (native_rgb5 != 0u)
+      /* A raw texel is already an exact PS1 RGB5 value. Re-quantizing it
+       * here makes the copy depend on the driver's normalized-float
+       * conversion and can turn a channel into n - 1. Let the RGB5
+       * attachment round it back to the same hardware value instead. */
+      if (native_rgb5 != 0u &&
+          frag_texture_blend_mode != BLEND_MODE_RAW_TEXTURE)
          output_rgb = floor(clamp(output_rgb, vec3(0.), vec3(1.)) * 31.) /
                       31.;
 
