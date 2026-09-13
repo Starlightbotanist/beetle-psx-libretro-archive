@@ -123,6 +123,27 @@ void main()
 	mediump vec3 rgb;
 #if defined(SCALED)
 	rgb = textureLod(uTexture, vUV, 0.0).rgb;
+	#if !defined(HDR)
+		/* Temporary native-color value map. Encode near-neutral highlights
+		 * before scanout conversion so a photograph identifies the stored
+		 * framebuffer class: red >= 253, green 245..252, blue 237..244,
+		 * yellow 229..236, and magenta 221..228. */
+		if (min(min(rgb.r, rgb.g), rgb.b) >= (221.0 / 255.0) &&
+		    max(max(rgb.r, rgb.g), rgb.b) - min(min(rgb.r, rgb.g), rgb.b) <= (2.0 / 255.0))
+		{
+			if (rgb.r >= (253.0 / 255.0))
+				FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+			else if (rgb.r >= (245.0 / 255.0))
+				FragColor = vec4(0.0, 1.0, 0.0, 1.0);
+			else if (rgb.r >= (237.0 / 255.0))
+				FragColor = vec4(0.0, 0.0, 1.0, 1.0);
+			else if (rgb.r >= (229.0 / 255.0))
+				FragColor = vec4(1.0, 1.0, 0.0, 1.0);
+			else
+				FragColor = vec4(1.0, 0.0, 1.0, 1.0);
+			return;
+		}
+	#endif
 	#if defined(DITHER)
 		rgb = apply_dither(rgb, ivec2(gl_FragCoord.xy));
 	#endif
