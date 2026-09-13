@@ -9055,6 +9055,8 @@ static bool renderer_ensure_scaled_read_snapshot(Renderer *self)
    return true;
 }
 
+static unsigned hdr_feedback_route_diag_frame;
+
 static void renderer_build_attribs(Renderer *self, BufferVertex *output, const Vertex *vertices, unsigned count, HdTextureHandle *hd_texture_index_out,
    bool *filtering_out, bool *scaled_read_out, unsigned *shift_out, bool *offset_uv_out){
       int16_t param;
@@ -9304,6 +9306,75 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
          param = (int16_t)((uint16_t)param | 0x4000u);
    }
 
+   /* Diagnostic only: record the final route decision for early and large
+    * textured HDR draws. This intentionally runs after the production gate so
+    * `armed` and `param` describe what the queued shader will actually see. */
+   if (psx_hdr_active &&
+       self->render_state.texture_mode != TextureMode_None &&
+       hd_texture_vram.height > 0)
+   {
+      static unsigned first_count;
+      static unsigned large_count;
+      bool texture_feedback;
+      bool palette_feedback = false;
+      bool feedback;
+      bool large;
+      bool armed;
+
+      texture_feedback = vram_prov_any(self,
+            (int)hd_texture_vram.x, (int)hd_texture_vram.y,
+            (int)hd_texture_vram.width + 1, (int)hd_texture_vram.height);
+      if (self->render_state.texture_mode != TextureMode_ABGR1555)
+      {
+         unsigned pal_w = self->render_state.texture_mode ==
+               TextureMode_Palette8bpp ? 256u : 16u;
+         palette_feedback = vram_prov_any(self,
+               (int)self->render_state.palette_offset_x,
+               (int)self->render_state.palette_offset_y,
+               (int)pal_w, 1);
+      }
+      feedback = texture_feedback || palette_feedback;
+      armed = ((uint16_t)param & 0x0800u) != 0u;
+      large = rect.width >= 64u && rect.height >= 32u;
+
+      if (log_cb &&
+          (first_count < 256u || (large && large_count < 1024u)))
+      {
+         log_cb(RETRO_LOG_INFO,
+               "[VK_HDR_ROUTE_FINAL] frame=%u mode=%u shift=%u mod=%u raw=%u "
+               "tex_fb=%u pal_fb=%u feedback=%u armed=%u param=0x%04x "
+               "tex=(%u,%u %ux%u) clut=(%u,%u) dst=(%d,%d %ux%u) "
+               "large=%u scaled=%u filter=%u dither=%u primitive=%u semi=%u "
+               "shade=(%.3f,%.3f,%.3f) fb_fmt=%u\n",
+               hdr_feedback_route_diag_frame,
+               (unsigned)self->render_state.texture_mode, shift,
+               (unsigned)self->render_state.texture_color_modulate,
+               (unsigned)!self->render_state.texture_color_modulate,
+               (unsigned)texture_feedback, (unsigned)palette_feedback,
+               (unsigned)feedback, (unsigned)armed,
+               (unsigned)(uint16_t)param,
+               (unsigned)hd_texture_vram.x, (unsigned)hd_texture_vram.y,
+               (unsigned)hd_texture_vram.width + 1,
+               (unsigned)hd_texture_vram.height,
+               (unsigned)self->render_state.palette_offset_x,
+               (unsigned)self->render_state.palette_offset_y,
+               (int)rect.x, (int)rect.y,
+               (unsigned)rect.width, (unsigned)rect.height,
+               (unsigned)large, (unsigned)scaled_read, (unsigned)filtering,
+               (unsigned)self->render_state.primitive_dither,
+               (unsigned)self->render_state.primitive_type,
+               (unsigned)self->render_state.semi_transparent,
+               vertices[0].cf[0] * 255.0f,
+               vertices[0].cf[1] * 255.0f,
+               vertices[0].cf[2] * 255.0f,
+               (unsigned)self->scaled_fb_format);
+      }
+
+      if (first_count < 256u)
+         first_count++;
+      if (large && large_count < 1024u)
+         large_count++;
+   }
    { unsigned i; for (i = 0; i < count; i++) {
       output[i].x = x[i];
       output[i].y = y[i];
@@ -20456,6 +20527,11 @@ void rhi_vulkan_prepare_frame(void)
     * don't dereference it. */
    if (renderer == NULL)
       return;
+
+   if (psx_hdr_active)
+      hdr_feedback_route_diag_frame++;
+   else
+      hdr_feedback_route_diag_frame = 0;
 
    renderer->scaled_uv_offset = scaled_uv_offset;
    renderer->primitive_filter_mode = (FilterMode)(filter_mode);
