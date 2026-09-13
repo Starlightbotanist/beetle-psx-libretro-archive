@@ -15,6 +15,20 @@ layout(constant_id = 3) const int SCALE = 1;
 layout(location = 0) out vec4 FragColor;
 layout(set = 0, binding = 2) uniform sampler2D uDitherLUT;
 
+/* The legacy subtraction biases an RGBA8 UNORM attachment's round-to-nearest
+ * conversion toward the PS1 renderer's required truncation. A floating-point
+ * attachment has no such conversion and would retain the subtraction as real
+ * darkening, so the RHI disables it for the wide HDR target. The attachment
+ * format is immutable for a renderer lifetime, making this a compile-time
+ * pipeline specialization rather than a per-fragment dynamic branch. */
+layout(constant_id = 10) const int WIDE_COLOR_TARGET = 0;
+
+void apply_unorm_store_bias(inout highp vec3 color)
+{
+	if (WIDE_COLOR_TARGET == 0)
+		color -= vec3(0.49 / 255.0);
+}
+
 /* Per-primitive state carried in BufferVertex::params. Native colour depth is
  * separate from the GP0 DTD bit: DTD selects the offset matrix, while every
  * ordinary 16-bpp write is reduced to RGB5 even when DTD is clear. */

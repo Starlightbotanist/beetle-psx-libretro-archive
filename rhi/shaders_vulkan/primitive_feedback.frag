@@ -111,7 +111,6 @@ void main()
 	}
 	else
 	{
-		/* Preserve the higher-colour path's historical truncation bias. */
-		FragColor.rgb -= 0.49 / 255.0;
+		apply_unorm_store_bias(FragColor.rgb);
 	}
 }

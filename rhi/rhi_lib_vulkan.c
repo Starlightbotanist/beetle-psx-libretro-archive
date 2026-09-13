@@ -1587,13 +1587,14 @@ static bool context_is_valid(const struct Context *self) { return self->valid; }
    enum { VULKAN_NUM_VERTEX_ATTRIBS = 16 };
    enum { VULKAN_NUM_VERTEX_BUFFERS = 4 };
    enum { VULKAN_PUSH_CONSTANT_SIZE = 128 };
-   /* Grown from 8 for SpecConstIndex_PreciseColor (constant_id 8). Two
-    * places must agree on this number: RHI_SPIRV_NUM_SPEC_CONSTANTS in
-    * rhi_spirv_reflect.h mirrors it, and a constant accepted here but
-    * rejected there is silently never applied to any pipeline -- while a
-    * constant set past this bound is an out-of-bounds write into the
+   /* Includes every primitive constant through SpecConstIndex_WideColorTarget
+    * (constant_id 10). Two places must agree on this number:
+    * RHI_SPIRV_NUM_SPEC_CONSTANTS in rhi_spirv_reflect.h mirrors it. A
+    * constant accepted here but rejected there is silently never applied to
+    * any pipeline, while a constant set past this bound is an out-of-bounds
+    * write into the
     * static state. Both happened; keep them in step. */
-   enum { VULKAN_NUM_SPEC_CONSTANTS = 10 };
+   enum { VULKAN_NUM_SPEC_CONSTANTS = 11 };
 
    struct ImplementationWorkarounds
    {
@@ -5823,7 +5824,10 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
        * programs, which also declare 0..6. */
       SpecConstIndex_PreciseColor = 8,
       /* Linear-light depth cueing; rides the precise-colour vertex path. */
-      SpecConstIndex_PgxpFog = 9
+      SpecConstIndex_PgxpFog = 9,
+      /* Actual scaled-framebuffer storage width. The primitive shaders use
+       * this only to avoid persisting the RGBA8 rounding bias in FP16. */
+      SpecConstIndex_WideColorTarget = 10
    };
 
    struct SaveState
@@ -6142,6 +6146,8 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
             (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? psx_pgxp_color : 0);
       commandbuffer_set_specialization_constant(cmd, SpecConstIndex_PgxpFog,
             (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? (psx_pgxp_color && psx_pgxp_fog) : 0);
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_WideColorTarget,
+            self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT);
    }
 
    static void renderer_render_semi_transparent_opaque_texture_primitives(Renderer *self){
@@ -10827,6 +10833,8 @@ static void renderer_semi_transparent_set_state(Renderer *self,
          (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? psx_pgxp_color : 0);
    commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_PgxpFog,
          (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? (psx_pgxp_color && psx_pgxp_fog) : 0);
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_WideColorTarget,
+         self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT);
    /* Only the feedback programs declare this; the pipeline hash masks it out
     * everywhere else. 1 = check-mask (historical behaviour), 0 = the routed
     * non-masked subtractive case. */
