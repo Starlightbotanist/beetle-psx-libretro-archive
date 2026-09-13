@@ -33,8 +33,18 @@ void apply_unorm_store_bias(inout highp vec3 color)
  * separate from the GP0 DTD bit: DTD selects the offset matrix, while every
  * ordinary 16-bpp write is reduced to RGB5 even when DTD is clear. */
 const uint PARAM_NATIVE_COLOR = 0x0400u;
+const uint PARAM_FRAMEBUFFER_FEEDBACK = 0x0800u;
 const uint PARAM_DITHER_NATIVE_RESOLUTION = 0x4000u;
 const uint PARAM_DITHER = 0x8000u;
+
+/* Scaled Vulkan VRAM can hold an RGB5 texel as either n << 3 (native-colour
+ * storage) or n / 31 (the older fixed-feedback output). Decode through the
+ * 8-bit expansion so both representations return the exact same n. */
+highp vec3 framebuffer_feedback_texel5(highp vec3 color)
+{
+	return clamp(floor(color * (255.0 / 8.0) + vec3(0.001)),
+		vec3(0.0), vec3(31.0));
+}
 
 bool primitive_native_color()
 {
