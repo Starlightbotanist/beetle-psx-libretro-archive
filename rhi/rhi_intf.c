@@ -3,6 +3,7 @@
 
 #include <math.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -155,6 +156,204 @@ static void tt_coh_mark_draw_area(void)
    }
 }
 
+/* Diagnostic-only capture of the Jumping Flash Level 2 framebuffer-texture
+ * writer. The exact destination geometry identifies the command independently
+ * of the texture mode, dither state and source values being investigated. The
+ * readback runs once all game draws for the frame have been queued, immediately
+ * before normal frame finalization. Each backend's existing synchronous path
+ * therefore resolves and waits for in-flight work without touching GPU.vram or
+ * introducing a second implementation of its packing rules. */
+#define RHI_LAVA_DIAG_X           416u
+#define RHI_LAVA_DIAG_Y           416u
+#define RHI_LAVA_DIAG_W            16u
+#define RHI_LAVA_DIAG_H            32u
+#define RHI_LAVA_DIAG_MAX_RECORDS   4u
+
+typedef struct
+{
+   uint32_t color;
+   uint16_t texpage_x;
+   uint16_t texpage_y;
+   uint16_t clut_x;
+   uint16_t clut_y;
+   uint16_t t0x;
+   uint16_t t0y;
+   uint16_t t3x;
+   uint16_t t3y;
+   uint16_t min_u;
+   uint16_t min_v;
+   uint16_t max_u;
+   uint16_t max_v;
+   uint8_t texture_blend_mode;
+   uint8_t depth_shift;
+   bool requested_dither;
+   bool effective_dither;
+   int blend_mode;
+} rhi_lava_diag_input;
+
+static bool rhi_lava_diag_pending;
+static unsigned rhi_lava_diag_records[3];
+static rhi_lava_diag_input rhi_lava_diag_last;
+
+static void rhi_lava_diag_reset(void)
+{
+   rhi_lava_diag_pending = false;
+   memset(rhi_lava_diag_records, 0, sizeof(rhi_lava_diag_records));
+   memset(&rhi_lava_diag_last, 0, sizeof(rhi_lava_diag_last));
+}
+
+static bool rhi_lava_diag_matches_quad(
+      float p0x, float p0y, float p1x, float p1y,
+      float p2x, float p2y, float p3x, float p3y,
+      bool is_sprite)
+{
+   float min_x = p0x;
+   float max_x = p0x;
+   float min_y = p0y;
+   float max_y = p0y;
+   const float x[3] = { p1x, p2x, p3x };
+   const float y[3] = { p1y, p2y, p3y };
+   unsigned i;
+
+   if (!is_sprite)
+      return false;
+
+   for (i = 0; i < 3; i++)
+   {
+      if (x[i] < min_x) min_x = x[i];
+      if (x[i] > max_x) max_x = x[i];
+      if (y[i] < min_y) min_y = y[i];
+      if (y[i] > max_y) max_y = y[i];
+   }
+
+   return min_x == (float)RHI_LAVA_DIAG_X &&
+          min_y == (float)RHI_LAVA_DIAG_Y &&
+          max_x == (float)(RHI_LAVA_DIAG_X + RHI_LAVA_DIAG_W) &&
+          max_y == (float)(RHI_LAVA_DIAG_Y + RHI_LAVA_DIAG_H);
+}
+
+static uint32_t rhi_lava_diag_hash(const uint16_t *vram)
+{
+   uint32_t hash = 2166136261u;
+   unsigned row;
+   unsigned col;
+
+   for (row = 0; row < RHI_LAVA_DIAG_H; row++)
+   {
+      const uint16_t *src = vram +
+            (RHI_LAVA_DIAG_Y + row) * TT_COH_VRAM_W + RHI_LAVA_DIAG_X;
+      for (col = 0; col < RHI_LAVA_DIAG_W; col++)
+      {
+         uint16_t word = src[col];
+         hash = (hash ^ (word & 0xffu)) * 16777619u;
+         hash = (hash ^ (word >> 8)) * 16777619u;
+      }
+   }
+
+   return hash;
+}
+
+static void rhi_lava_diag_capture(void)
+{
+   uint16_t *vram;
+   const char *backend;
+   unsigned record;
+   unsigned row;
+   unsigned col;
+   bool ok = false;
+
+   if (!rhi_lava_diag_pending)
+      return;
+   rhi_lava_diag_pending = false;
+
+   if (!log_cb || (rhi_type != RHI_OPENGL && rhi_type != RHI_VULKAN))
+      return;
+   if (rhi_lava_diag_records[rhi_type] >= RHI_LAVA_DIAG_MAX_RECORDS)
+      return;
+
+   record = rhi_lava_diag_records[rhi_type]++;
+   backend = rhi_type == RHI_OPENGL ? "opengl" : "vulkan";
+   vram = (uint16_t *)calloc(
+         (size_t)TT_COH_VRAM_W * TT_COH_VRAM_H, sizeof(uint16_t));
+   if (!vram)
+   {
+      log_cb(RETRO_LOG_ERROR,
+            "[RHI_LAVA_READBACK] backend=%s record=%u allocation_failed=1\n",
+            backend, record);
+      return;
+   }
+
+   switch (rhi_type)
+   {
+      case RHI_OPENGL:
+#if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
+         ok = rhi_gl_read_vram(RHI_LAVA_DIAG_X, RHI_LAVA_DIAG_Y,
+               RHI_LAVA_DIAG_W, RHI_LAVA_DIAG_H, vram);
+#endif
+         break;
+      case RHI_VULKAN:
+#if defined(HAVE_VULKAN)
+         ok = rhi_vulkan_read_vram(RHI_LAVA_DIAG_X, RHI_LAVA_DIAG_Y,
+               RHI_LAVA_DIAG_W, RHI_LAVA_DIAG_H, vram);
+#endif
+         break;
+      default:
+         break;
+   }
+
+   log_cb(RETRO_LOG_INFO,
+         "[RHI_LAVA_READBACK] backend=%s record=%u ok=%u "
+         "dst=%u,%u %ux%u hash=%08x color=%06x "
+         "mode=%u depth=%u requested_dither=%u effective_dither=%u blend=%d "
+         "page=%u,%u clut=%u,%u uv0=%u,%u uv3=%u,%u "
+         "limits=%u,%u,%u,%u\n",
+         backend, record, (unsigned)ok,
+         RHI_LAVA_DIAG_X, RHI_LAVA_DIAG_Y,
+         RHI_LAVA_DIAG_W, RHI_LAVA_DIAG_H,
+         ok ? rhi_lava_diag_hash(vram) : 0u,
+         rhi_lava_diag_last.color & 0xffffffu,
+         (unsigned)rhi_lava_diag_last.texture_blend_mode,
+         (unsigned)rhi_lava_diag_last.depth_shift,
+         (unsigned)rhi_lava_diag_last.requested_dither,
+         (unsigned)rhi_lava_diag_last.effective_dither,
+         rhi_lava_diag_last.blend_mode,
+         rhi_lava_diag_last.texpage_x, rhi_lava_diag_last.texpage_y,
+         rhi_lava_diag_last.clut_x, rhi_lava_diag_last.clut_y,
+         rhi_lava_diag_last.t0x, rhi_lava_diag_last.t0y,
+         rhi_lava_diag_last.t3x, rhi_lava_diag_last.t3y,
+         rhi_lava_diag_last.min_u, rhi_lava_diag_last.min_v,
+         rhi_lava_diag_last.max_u, rhi_lava_diag_last.max_v);
+
+   if (ok)
+   {
+      for (row = 0; row < RHI_LAVA_DIAG_H; row++)
+      {
+         char line[192];
+         size_t used;
+         int written;
+         const uint16_t *src = vram +
+               (RHI_LAVA_DIAG_Y + row) * TT_COH_VRAM_W + RHI_LAVA_DIAG_X;
+
+         written = snprintf(line, sizeof(line),
+               "[RHI_LAVA_ROW] backend=%s record=%u y=%u words=",
+               backend, record, RHI_LAVA_DIAG_Y + row);
+         used = written > 0 ? (size_t)written : 0;
+         for (col = 0; col < RHI_LAVA_DIAG_W && used < sizeof(line); col++)
+         {
+            written = snprintf(line + used, sizeof(line) - used,
+                  "%04x%s", src[col],
+                  col + 1 == RHI_LAVA_DIAG_W ? "" : " ");
+            if (written < 0)
+               break;
+            used += (size_t)written;
+         }
+         log_cb(RETRO_LOG_INFO, "%s\n", line);
+      }
+   }
+
+   free(vram);
+}
+
 static bool rhi_soft_open(bool is_pal)
 {
    content_is_pal = is_pal;
@@ -294,6 +493,7 @@ bool rhi_intf_open(bool is_pal, bool force_software)
    gl_initialized            = false;
 
    tt_coh_reset();
+   rhi_lava_diag_reset();
 
 #if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES) || defined(HAVE_VULKAN)
    struct retro_variable var = {0};
@@ -507,6 +707,8 @@ void rhi_intf_finalize_frame(const void *fb, unsigned width,
    tt_log("finalize_frame display=%ux%u\n",
          (unsigned)width, (unsigned)height);
 #endif
+
+   rhi_lava_diag_capture();
 
    switch (rhi_type)
    {
@@ -875,6 +1077,7 @@ void rhi_intf_push_quad(
    bool is_sprite,
    bool may_be_2d)
 {
+   bool requested_dither = dither;
    dither = dither && !is_sprite;
 
 #ifdef RHI_DUMP
@@ -924,6 +1127,30 @@ void rhi_intf_push_quad(
                blend_mode, mask_test, set_mask, is_sprite, may_be_2d);
 #endif
          break;
+   }
+
+   if (rhi_lava_diag_matches_quad(
+         p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y, is_sprite))
+   {
+      rhi_lava_diag_last.color = c0;
+      rhi_lava_diag_last.texpage_x = texpage_x;
+      rhi_lava_diag_last.texpage_y = texpage_y;
+      rhi_lava_diag_last.clut_x = clut_x;
+      rhi_lava_diag_last.clut_y = clut_y;
+      rhi_lava_diag_last.t0x = t0x;
+      rhi_lava_diag_last.t0y = t0y;
+      rhi_lava_diag_last.t3x = t3x;
+      rhi_lava_diag_last.t3y = t3y;
+      rhi_lava_diag_last.min_u = min_u;
+      rhi_lava_diag_last.min_v = min_v;
+      rhi_lava_diag_last.max_u = max_u;
+      rhi_lava_diag_last.max_v = max_v;
+      rhi_lava_diag_last.texture_blend_mode = texture_blend_mode;
+      rhi_lava_diag_last.depth_shift = depth_shift;
+      rhi_lava_diag_last.requested_dither = requested_dither;
+      rhi_lava_diag_last.effective_dither = dither;
+      rhi_lava_diag_last.blend_mode = blend_mode;
+      rhi_lava_diag_pending = true;
    }
 }
 
