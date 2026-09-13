@@ -6608,6 +6608,20 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
 /* 3 LSBs are ignored. */
 #define FBCOLOR_TO_RGBA8(color) ((color) & 0xfff8f8f8u)
 
+/* Temporary issue #967 diagnostics. Log the near-white GP0 commands that can
+ * expose the difference between an 8-bit Vulkan render target (0xff white) and
+ * the PS1's stored RGB5 maximum (0xf8 after expansion). Keep separate bounded
+ * counters so a run of fills cannot hide the polygon command under test. */
+#define VK_COLOR_DEPTH_DIAG_LIMIT 64
+static unsigned vk_color_depth_diag_fill_count;
+static unsigned vk_color_depth_diag_triangle_count;
+static unsigned vk_color_depth_diag_quad_count;
+
+static bool vk_color_depth_diag_is_near_white(uint32_t color)
+{
+   return (color & 0x00f8f8f8u) == 0x00f8f8f8u;
+}
+
 static INLINE void fbcolor_to_rgba32f(float *v, uint32_t color)
 {
    /* 3 LSBs are ignored. */
@@ -6654,6 +6668,10 @@ static void renderer_init(Renderer *self,
    self->primitive_index = 0;
    self->render_pass_is_feedback = false;
    self->quad.data = NULL;
+
+   vk_color_depth_diag_fill_count = 0;
+   vk_color_depth_diag_triangle_count = 0;
+   vk_color_depth_diag_quad_count = 0;
 
    /* ImageHandle is now a plain struct with no default member initializer;
     * null every handle member so conditional assignment and ~Renderer's
@@ -6832,6 +6850,10 @@ static void renderer_init(Renderer *self,
             self->msaa = 1;
       }
    }
+
+   LOGI("[VK_COLOR_DEPTH_DIAG] renderer scaling=%u msaa=%u psx_color_format=%d scaled_fb_format=%d\n",
+         self->scaling, self->msaa, psx_color_format,
+         (int)self->scaled_fb_format);
 
    if (self->msaa > 1)
    {
@@ -20829,6 +20851,20 @@ void rhi_vulkan_push_triangle(
    if (!renderer)
       return;
 
+   if (texture_blend_mode == 0 &&
+         vk_color_depth_diag_is_near_white(c0) &&
+         vk_color_depth_diag_is_near_white(c1) &&
+         vk_color_depth_diag_is_near_white(c2) &&
+         vk_color_depth_diag_triangle_count < VK_COLOR_DEPTH_DIAG_LIMIT)
+   {
+      LOGI("[VK_COLOR_DEPTH_DIAG] triangle colors=%08x,%08x,%08x pos=(%.3f,%.3f),(%.3f,%.3f),(%.3f,%.3f) precise=%u dither=%u blend=%d mask_test=%u set_mask=%u\n",
+            (unsigned)c0, (unsigned)c1, (unsigned)c2,
+            p0x, p0y, p1x, p1y, p2x, p2y,
+            precise_rgb ? 1u : 0u, dither ? 1u : 0u, blend_mode,
+            mask_test ? 1u : 0u, set_mask ? 1u : 0u);
+      vk_color_depth_diag_triangle_count++;
+   }
+
    renderer->render_state.texture_color_modulate = texture_blend_mode == 2;
    renderer->render_state.primitive_dither = dither;
    renderer_set_palette_offset(renderer, clut_x, clut_y);
@@ -20879,6 +20915,22 @@ void rhi_vulkan_push_quad(
 {
    if (!renderer)
       return;
+
+   if (texture_blend_mode == 0 &&
+         vk_color_depth_diag_is_near_white(c0) &&
+         vk_color_depth_diag_is_near_white(c1) &&
+         vk_color_depth_diag_is_near_white(c2) &&
+         vk_color_depth_diag_is_near_white(c3) &&
+         vk_color_depth_diag_quad_count < VK_COLOR_DEPTH_DIAG_LIMIT)
+   {
+      LOGI("[VK_COLOR_DEPTH_DIAG] quad colors=%08x,%08x,%08x,%08x pos=(%.3f,%.3f),(%.3f,%.3f),(%.3f,%.3f),(%.3f,%.3f) precise=%u dither=%u blend=%d mask_test=%u set_mask=%u sprite=%u may_be_2d=%u\n",
+            (unsigned)c0, (unsigned)c1, (unsigned)c2, (unsigned)c3,
+            p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y,
+            precise_rgb ? 1u : 0u, dither ? 1u : 0u, blend_mode,
+            mask_test ? 1u : 0u, set_mask ? 1u : 0u,
+            is_sprite ? 1u : 0u, may_be_2d ? 1u : 0u);
+      vk_color_depth_diag_quad_count++;
+   }
 
    renderer->render_state.texture_color_modulate = texture_blend_mode == 2;
    renderer->render_state.primitive_dither = dither;
@@ -21058,6 +21110,14 @@ void rhi_vulkan_fill_rect(uint32_t color,
    if (renderer)
    {
       TTRect _r = { x, y, w, h };
+      if (vk_color_depth_diag_is_near_white(color) &&
+            vk_color_depth_diag_fill_count < VK_COLOR_DEPTH_DIAG_LIMIT)
+      {
+         LOGI("[VK_COLOR_DEPTH_DIAG] fill color=%08x rect=%u,%u %ux%u\n",
+               (unsigned)color, (unsigned)x, (unsigned)y,
+               (unsigned)w, (unsigned)h);
+         vk_color_depth_diag_fill_count++;
+      }
       renderer_clear_rect(renderer, &_r, color);
    }
 }
