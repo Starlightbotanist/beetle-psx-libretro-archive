@@ -4713,6 +4713,10 @@ static void cbh_move(struct CommandBufferHandle *dst,
          VkQueue graphics_queue;
          VkQueue compute_queue;
          VkQueue transfer_queue;
+         VkQueue frontend_queue;
+         void *frontend_queue_handle;
+         void (*frontend_queue_lock)(void *handle);
+         void (*frontend_queue_unlock)(void *handle);
          VkPipelineCache pipeline_cache;
          /* Persistent pipeline cache bookkeeping: CRC/size of the blob last
           * read from or written to disk (so an unchanged blob is not
@@ -16112,6 +16116,10 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       self->graphics_queue = VK_NULL_HANDLE;
       self->compute_queue  = VK_NULL_HANDLE;
       self->transfer_queue = VK_NULL_HANDLE;
+      self->frontend_queue = VK_NULL_HANDLE;
+      self->frontend_queue_handle = NULL;
+      self->frontend_queue_lock = NULL;
+      self->frontend_queue_unlock = NULL;
       self->pipeline_cache = VK_NULL_HANDLE;
       self->pipeline_cache_saved_crc    = 0;
       self->pipeline_cache_saved_size   = 0;
@@ -16637,6 +16645,29 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       }
    }
 
+   static VkResult device_queue_submit(Device *self, VkQueue queue,
+         uint32_t submit_count, const VkSubmitInfo *submits, VkFence fence)
+   {
+      VkResult result;
+      bool lock_frontend_queue;
+
+      /* The libretro Vulkan contract requires external synchronization for the
+       * queue shared with the frontend, even on the retro_run thread. Compare
+       * handles so private queues remain independent while aliases are covered. */
+      lock_frontend_queue = self->frontend_queue != VK_NULL_HANDLE &&
+            queue == self->frontend_queue &&
+            self->frontend_queue_lock != NULL &&
+            self->frontend_queue_unlock != NULL;
+
+      if (lock_frontend_queue)
+         self->frontend_queue_lock(self->frontend_queue_handle);
+      result = vkQueueSubmit(queue, submit_count, submits, fence);
+      if (lock_frontend_queue)
+         self->frontend_queue_unlock(self->frontend_queue_handle);
+
+      return result;
+   }
+
    static void device_submit_nolock(Device *self,
          CommandBufferHandle cmd,
          Fence *fence,
@@ -16734,7 +16765,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       }
 
       cleared_fence = fence ? fencemanager_request_cleared_fence(&self->managers.fence) : VK_NULL_HANDLE;
-      result = vkQueueSubmit(queue, 1, &submit, cleared_fence);
+      result = device_queue_submit(self, queue, 1, &submit, cleared_fence);
 
       if (result != VK_SUCCESS)
          LOGE("vkQueueSubmit failed (code: %d).\n", (int)(result));
@@ -17009,7 +17040,7 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
             break;
       }
 
-      result = vkQueueSubmit(queue, VkSubmitInfoVec_size(&submits), VkSubmitInfoVec_data(&submits), cleared_fence);
+      result = device_queue_submit(self, queue, VkSubmitInfoVec_size(&submits), VkSubmitInfoVec_data(&submits), cleared_fence);
       if (result != VK_SUCCESS)
          LOGE("vkQueueSubmit failed (code: %d).\n", (int)(result));
       cbhvec_clear(submissions);
@@ -19312,6 +19343,15 @@ extern retro_log_printf_t log_cb;
 static struct retro_hw_render_callback hw_render;
 static const struct retro_hw_render_interface_vulkan *vulkan;
 
+static void device_set_frontend_queue(Device *self,
+      const struct retro_hw_render_interface_vulkan *frontend)
+{
+   self->frontend_queue = frontend->queue;
+   self->frontend_queue_handle = frontend->handle;
+   self->frontend_queue_lock = frontend->lock_queue;
+   self->frontend_queue_unlock = frontend->unlock_queue;
+}
+
 /* Owning vector of retro_vulkan_image (POD), replacing A dynamic array of
  * retro_vulkan_image. resize() grows/shrinks the backing array; grown slots are
  * zero-initialised. */
@@ -19574,6 +19614,7 @@ static void vk_context_reset(void)
    device = (Device *)malloc(sizeof(Device));
    device_init(device);
    device_set_context(device, *&context);
+   device_set_frontend_queue(device, vulkan);
 
    renderer = (Renderer *)malloc(sizeof(Renderer));
    renderer_init(renderer, device, scaling, msaa, owned_u32_empty(&save_state.vram) ? NULL : &save_state);
