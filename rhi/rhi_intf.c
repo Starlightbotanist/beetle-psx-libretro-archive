@@ -157,17 +157,20 @@ static void tt_coh_mark_draw_area(void)
 }
 
 /* Diagnostic-only capture of the Jumping Flash Level 2 framebuffer-texture
- * writer. The exact destination geometry identifies the command independently
- * of the texture mode, dither state and source values being investigated. The
- * readback runs once all game draws for the frame have been queued, immediately
- * before normal frame finalization. Each backend's existing synchronous path
- * therefore resolves and waits for in-flight work without touching GPU.vram or
- * introducing a second implementation of its packing rules. */
+ * writer. The destination geometry is reused by an untextured sprite, so match
+ * the raw direct-colour command as well. The readback runs once all game draws
+ * for the frame have been queued, immediately before normal frame finalization.
+ * Each backend's existing synchronous path therefore resolves and waits for
+ * in-flight work without touching GPU.vram or introducing a second packing
+ * implementation. The source-to-destination comparison applies the GPU's
+ * texture-window transform to the nearest sampled source word; a raw 15-bit
+ * sprite must preserve that word exactly. */
 #define RHI_LAVA_DIAG_X           416u
 #define RHI_LAVA_DIAG_Y           416u
 #define RHI_LAVA_DIAG_W            16u
 #define RHI_LAVA_DIAG_H            32u
 #define RHI_LAVA_DIAG_MAX_RECORDS   4u
+#define RHI_LAVA_DIAG_RAW_TEXTURE    1u
 
 typedef struct
 {
@@ -184,6 +187,10 @@ typedef struct
    uint16_t min_v;
    uint16_t max_u;
    uint16_t max_v;
+   uint8_t tww;
+   uint8_t twh;
+   uint8_t twx;
+   uint8_t twy;
    uint8_t texture_blend_mode;
    uint8_t depth_shift;
    bool requested_dither;
@@ -194,12 +201,15 @@ typedef struct
 static bool rhi_lava_diag_pending;
 static unsigned rhi_lava_diag_records[3];
 static rhi_lava_diag_input rhi_lava_diag_last;
+static uint8_t rhi_lava_diag_tex_window[4];
 
 static void rhi_lava_diag_reset(void)
 {
    rhi_lava_diag_pending = false;
    memset(rhi_lava_diag_records, 0, sizeof(rhi_lava_diag_records));
    memset(&rhi_lava_diag_last, 0, sizeof(rhi_lava_diag_last));
+   memset(rhi_lava_diag_tex_window, 0,
+         sizeof(rhi_lava_diag_tex_window));
 }
 
 static bool rhi_lava_diag_matches_quad(
@@ -232,7 +242,26 @@ static bool rhi_lava_diag_matches_quad(
           max_y == (float)(RHI_LAVA_DIAG_Y + RHI_LAVA_DIAG_H);
 }
 
-static uint32_t rhi_lava_diag_hash(const uint16_t *vram)
+static uint16_t rhi_lava_diag_source_word(const uint16_t *vram,
+      unsigned row, unsigned col)
+{
+   uint8_t mask_x = (uint8_t)~(rhi_lava_diag_last.tww << 3);
+   uint8_t mask_y = (uint8_t)~(rhi_lava_diag_last.twh << 3);
+   uint8_t or_x = (uint8_t)((rhi_lava_diag_last.twx &
+         rhi_lava_diag_last.tww) << 3);
+   uint8_t or_y = (uint8_t)((rhi_lava_diag_last.twy &
+         rhi_lava_diag_last.twh) << 3);
+   uint8_t u = (uint8_t)(rhi_lava_diag_last.t0x + col);
+   uint8_t v = (uint8_t)(rhi_lava_diag_last.t0y + row);
+   unsigned x = (rhi_lava_diag_last.texpage_x + ((u & mask_x) | or_x)) &
+         (TT_COH_VRAM_W - 1);
+   unsigned y = (rhi_lava_diag_last.texpage_y + ((v & mask_y) | or_y)) &
+         (TT_COH_VRAM_H - 1);
+
+   return vram[y * TT_COH_VRAM_W + x];
+}
+
+static uint32_t rhi_lava_diag_hash(const uint16_t *vram, bool source)
 {
    uint32_t hash = 2166136261u;
    unsigned row;
@@ -240,17 +269,39 @@ static uint32_t rhi_lava_diag_hash(const uint16_t *vram)
 
    for (row = 0; row < RHI_LAVA_DIAG_H; row++)
    {
-      const uint16_t *src = vram +
-            (RHI_LAVA_DIAG_Y + row) * TT_COH_VRAM_W + RHI_LAVA_DIAG_X;
       for (col = 0; col < RHI_LAVA_DIAG_W; col++)
       {
-         uint16_t word = src[col];
+         uint16_t word = source ? rhi_lava_diag_source_word(vram, row, col) :
+               vram[(RHI_LAVA_DIAG_Y + row) * TT_COH_VRAM_W +
+                    RHI_LAVA_DIAG_X + col];
          hash = (hash ^ (word & 0xffu)) * 16777619u;
          hash = (hash ^ (word >> 8)) * 16777619u;
       }
    }
 
    return hash;
+}
+
+static bool rhi_lava_diag_read_vram(uint16_t x, uint16_t y,
+      uint16_t w, uint16_t h, uint16_t *vram)
+{
+   switch (rhi_type)
+   {
+      case RHI_OPENGL:
+#if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
+         return rhi_gl_read_vram(x, y, w, h, vram);
+#endif
+         break;
+      case RHI_VULKAN:
+#if defined(HAVE_VULKAN)
+         return rhi_vulkan_read_vram(x, y, w, h, vram);
+#endif
+         break;
+      default:
+         break;
+   }
+
+   return false;
 }
 
 static void rhi_lava_diag_capture(void)
@@ -260,7 +311,19 @@ static void rhi_lava_diag_capture(void)
    unsigned record;
    unsigned row;
    unsigned col;
-   bool ok = false;
+   unsigned mismatches = 0;
+   unsigned low_byte_mismatches = 0;
+   unsigned high_byte_mismatches = 0;
+   uint8_t mask_x;
+   uint8_t mask_y;
+   uint8_t or_x;
+   uint8_t or_y;
+   unsigned src_x0 = TT_COH_VRAM_W - 1;
+   unsigned src_y0 = TT_COH_VRAM_H - 1;
+   unsigned src_x1 = 0;
+   unsigned src_y1 = 0;
+   bool source_ok;
+   bool destination_ok;
 
    if (!rhi_lava_diag_pending)
       return;
@@ -283,34 +346,68 @@ static void rhi_lava_diag_capture(void)
       return;
    }
 
-   switch (rhi_type)
+   mask_x = (uint8_t)~(rhi_lava_diag_last.tww << 3);
+   mask_y = (uint8_t)~(rhi_lava_diag_last.twh << 3);
+   or_x = (uint8_t)((rhi_lava_diag_last.twx &
+         rhi_lava_diag_last.tww) << 3);
+   or_y = (uint8_t)((rhi_lava_diag_last.twy &
+         rhi_lava_diag_last.twh) << 3);
+   for (row = 0; row < RHI_LAVA_DIAG_H; row++)
    {
-      case RHI_OPENGL:
-#if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
-         ok = rhi_gl_read_vram(RHI_LAVA_DIAG_X, RHI_LAVA_DIAG_Y,
-               RHI_LAVA_DIAG_W, RHI_LAVA_DIAG_H, vram);
-#endif
-         break;
-      case RHI_VULKAN:
-#if defined(HAVE_VULKAN)
-         ok = rhi_vulkan_read_vram(RHI_LAVA_DIAG_X, RHI_LAVA_DIAG_Y,
-               RHI_LAVA_DIAG_W, RHI_LAVA_DIAG_H, vram);
-#endif
-         break;
-      default:
-         break;
+      for (col = 0; col < RHI_LAVA_DIAG_W; col++)
+      {
+         uint8_t u = (uint8_t)(rhi_lava_diag_last.t0x + col);
+         uint8_t v = (uint8_t)(rhi_lava_diag_last.t0y + row);
+         unsigned x = (rhi_lava_diag_last.texpage_x +
+               ((u & mask_x) | or_x)) & (TT_COH_VRAM_W - 1);
+         unsigned y = (rhi_lava_diag_last.texpage_y +
+               ((v & mask_y) | or_y)) & (TT_COH_VRAM_H - 1);
+         if (x < src_x0) src_x0 = x;
+         if (x > src_x1) src_x1 = x;
+         if (y < src_y0) src_y0 = y;
+         if (y > src_y1) src_y1 = y;
+      }
+   }
+
+   source_ok = rhi_lava_diag_read_vram((uint16_t)src_x0,
+         (uint16_t)src_y0, (uint16_t)(src_x1 - src_x0 + 1),
+         (uint16_t)(src_y1 - src_y0 + 1), vram);
+   destination_ok = rhi_lava_diag_read_vram(RHI_LAVA_DIAG_X,
+         RHI_LAVA_DIAG_Y, RHI_LAVA_DIAG_W, RHI_LAVA_DIAG_H, vram);
+
+   if (source_ok && destination_ok)
+   {
+      for (row = 0; row < RHI_LAVA_DIAG_H; row++)
+      {
+         for (col = 0; col < RHI_LAVA_DIAG_W; col++)
+         {
+            uint16_t expected = rhi_lava_diag_source_word(vram, row, col);
+            uint16_t actual = vram[(RHI_LAVA_DIAG_Y + row) *
+                  TT_COH_VRAM_W + RHI_LAVA_DIAG_X + col];
+            if (expected != actual) mismatches++;
+            if ((expected & 0xffu) != (actual & 0xffu))
+               low_byte_mismatches++;
+            if ((expected >> 8) != (actual >> 8))
+               high_byte_mismatches++;
+         }
+      }
    }
 
    log_cb(RETRO_LOG_INFO,
-         "[RHI_LAVA_READBACK] backend=%s record=%u ok=%u "
-         "dst=%u,%u %ux%u hash=%08x color=%06x "
+         "[RHI_LAVA_COMPARE] backend=%s record=%u source_ok=%u "
+         "destination_ok=%u src=%u,%u %ux%u src_hash=%08x "
+         "dst=%u,%u %ux%u dst_hash=%08x mismatches=%u "
+         "low_byte_mismatches=%u high_byte_mismatches=%u color=%06x "
          "mode=%u depth=%u requested_dither=%u effective_dither=%u blend=%d "
          "page=%u,%u clut=%u,%u uv0=%u,%u uv3=%u,%u "
-         "limits=%u,%u,%u,%u\n",
-         backend, record, (unsigned)ok,
+         "limits=%u,%u,%u,%u window=%u,%u,%u,%u\n",
+         backend, record, (unsigned)source_ok, (unsigned)destination_ok,
+         src_x0, src_y0, src_x1 - src_x0 + 1, src_y1 - src_y0 + 1,
+         source_ok ? rhi_lava_diag_hash(vram, true) : 0u,
          RHI_LAVA_DIAG_X, RHI_LAVA_DIAG_Y,
          RHI_LAVA_DIAG_W, RHI_LAVA_DIAG_H,
-         ok ? rhi_lava_diag_hash(vram) : 0u,
+         destination_ok ? rhi_lava_diag_hash(vram, false) : 0u,
+         mismatches, low_byte_mismatches, high_byte_mismatches,
          rhi_lava_diag_last.color & 0xffffffu,
          (unsigned)rhi_lava_diag_last.texture_blend_mode,
          (unsigned)rhi_lava_diag_last.depth_shift,
@@ -322,26 +419,31 @@ static void rhi_lava_diag_capture(void)
          rhi_lava_diag_last.t0x, rhi_lava_diag_last.t0y,
          rhi_lava_diag_last.t3x, rhi_lava_diag_last.t3y,
          rhi_lava_diag_last.min_u, rhi_lava_diag_last.min_v,
-         rhi_lava_diag_last.max_u, rhi_lava_diag_last.max_v);
+         rhi_lava_diag_last.max_u, rhi_lava_diag_last.max_v,
+         (unsigned)rhi_lava_diag_last.tww,
+         (unsigned)rhi_lava_diag_last.twh,
+         (unsigned)rhi_lava_diag_last.twx,
+         (unsigned)rhi_lava_diag_last.twy);
 
-   if (ok)
+   if (source_ok && destination_ok)
    {
       for (row = 0; row < RHI_LAVA_DIAG_H; row++)
       {
-         char line[192];
+         char line[320];
          size_t used;
          int written;
-         const uint16_t *src = vram +
-               (RHI_LAVA_DIAG_Y + row) * TT_COH_VRAM_W + RHI_LAVA_DIAG_X;
 
          written = snprintf(line, sizeof(line),
-               "[RHI_LAVA_ROW] backend=%s record=%u y=%u words=",
+               "[RHI_LAVA_COMPARE_ROW] backend=%s record=%u y=%u words=",
                backend, record, RHI_LAVA_DIAG_Y + row);
          used = written > 0 ? (size_t)written : 0;
          for (col = 0; col < RHI_LAVA_DIAG_W && used < sizeof(line); col++)
          {
+            uint16_t expected = rhi_lava_diag_source_word(vram, row, col);
+            uint16_t actual = vram[(RHI_LAVA_DIAG_Y + row) *
+                  TT_COH_VRAM_W + RHI_LAVA_DIAG_X + col];
             written = snprintf(line + used, sizeof(line) - used,
-                  "%04x%s", src[col],
+                  "%04x/%04x%s", expected, actual,
                   col + 1 == RHI_LAVA_DIAG_W ? "" : " ");
             if (written < 0)
                break;
@@ -731,6 +833,11 @@ void rhi_intf_finalize_frame(const void *fb, unsigned width,
 void rhi_intf_set_tex_window(uint8_t tww, uint8_t twh,
                              uint8_t twx, uint8_t twy)
 {
+   rhi_lava_diag_tex_window[0] = tww;
+   rhi_lava_diag_tex_window[1] = twh;
+   rhi_lava_diag_tex_window[2] = twx;
+   rhi_lava_diag_tex_window[3] = twy;
+
 #ifdef RHI_DUMP
    rhi_dump_set_tex_window(tww, twh, twx, twy);
 #endif
@@ -1129,7 +1236,9 @@ void rhi_intf_push_quad(
          break;
    }
 
-   if (rhi_lava_diag_matches_quad(
+   if (texture_blend_mode == RHI_LAVA_DIAG_RAW_TEXTURE &&
+       depth_shift == 0 &&
+       rhi_lava_diag_matches_quad(
          p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y, is_sprite))
    {
       rhi_lava_diag_last.color = c0;
@@ -1145,6 +1254,10 @@ void rhi_intf_push_quad(
       rhi_lava_diag_last.min_v = min_v;
       rhi_lava_diag_last.max_u = max_u;
       rhi_lava_diag_last.max_v = max_v;
+      rhi_lava_diag_last.tww = rhi_lava_diag_tex_window[0];
+      rhi_lava_diag_last.twh = rhi_lava_diag_tex_window[1];
+      rhi_lava_diag_last.twx = rhi_lava_diag_tex_window[2];
+      rhi_lava_diag_last.twy = rhi_lava_diag_tex_window[3];
       rhi_lava_diag_last.texture_blend_mode = texture_blend_mode;
       rhi_lava_diag_last.depth_shift = depth_shift;
       rhi_lava_diag_last.requested_dither = requested_dither;
