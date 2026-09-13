@@ -195,6 +195,7 @@ typedef struct
    uint8_t depth_shift;
    bool requested_dither;
    bool effective_dither;
+   bool is_sprite;
    int blend_mode;
 } rhi_lava_diag_input;
 
@@ -212,10 +213,15 @@ static void rhi_lava_diag_reset(void)
          sizeof(rhi_lava_diag_tex_window));
 }
 
-static bool rhi_lava_diag_matches_quad(
+static bool rhi_lava_diag_matches_writer(
       float p0x, float p0y, float p1x, float p1y,
       float p2x, float p2y, float p3x, float p3y,
-      bool is_sprite)
+      uint16_t t0x, uint16_t t0y,
+      uint16_t t1x, uint16_t t1y,
+      uint16_t t2x, uint16_t t2y,
+      uint16_t t3x, uint16_t t3y,
+      uint16_t texpage_x, uint16_t texpage_y,
+      uint8_t texture_blend_mode, uint8_t depth_shift)
 {
    float min_x = p0x;
    float max_x = p0x;
@@ -225,9 +231,6 @@ static bool rhi_lava_diag_matches_quad(
    const float y[3] = { p1y, p2y, p3y };
    unsigned i;
 
-   if (!is_sprite)
-      return false;
-
    for (i = 0; i < 3; i++)
    {
       if (x[i] < min_x) min_x = x[i];
@@ -236,7 +239,19 @@ static bool rhi_lava_diag_matches_quad(
       if (y[i] > max_y) max_y = y[i];
    }
 
-   return min_x == (float)RHI_LAVA_DIAG_X &&
+   return texture_blend_mode == RHI_LAVA_DIAG_RAW_TEXTURE &&
+          depth_shift == 0 &&
+          texpage_x == 256 && texpage_y == 256 &&
+          (uint8_t)~(rhi_lava_diag_tex_window[0] << 3) == 0x0f &&
+          (uint8_t)~(rhi_lava_diag_tex_window[1] << 3) == 0x1f &&
+          (uint8_t)((rhi_lava_diag_tex_window[2] &
+                rhi_lava_diag_tex_window[0]) << 3) == 0xe0 &&
+          (uint8_t)((rhi_lava_diag_tex_window[3] &
+                rhi_lava_diag_tex_window[1]) << 3) == 0x00 &&
+          t0x == 128 && t1x == 144 && t2x == 128 && t3x == 144 &&
+          t1y == t0y && t2y == (uint16_t)(t0y + 32) &&
+          t3y == (uint16_t)(t0y + 32) &&
+          min_x == (float)RHI_LAVA_DIAG_X &&
           min_y == (float)RHI_LAVA_DIAG_Y &&
           max_x == (float)(RHI_LAVA_DIAG_X + RHI_LAVA_DIAG_W) &&
           max_y == (float)(RHI_LAVA_DIAG_Y + RHI_LAVA_DIAG_H);
@@ -314,6 +329,8 @@ static void rhi_lava_diag_capture(void)
    unsigned mismatches = 0;
    unsigned low_byte_mismatches = 0;
    unsigned high_byte_mismatches = 0;
+   unsigned opaque_words = 0;
+   unsigned transparent_words = 0;
    uint8_t mask_x;
    uint8_t mask_y;
    uint8_t or_x;
@@ -384,6 +401,12 @@ static void rhi_lava_diag_capture(void)
             uint16_t expected = rhi_lava_diag_source_word(vram, row, col);
             uint16_t actual = vram[(RHI_LAVA_DIAG_Y + row) *
                   TT_COH_VRAM_W + RHI_LAVA_DIAG_X + col];
+            if (expected == 0)
+            {
+               transparent_words++;
+               continue;
+            }
+            opaque_words++;
             if (expected != actual) mismatches++;
             if ((expected & 0xffu) != (actual & 0xffu))
                low_byte_mismatches++;
@@ -397,8 +420,10 @@ static void rhi_lava_diag_capture(void)
          "[RHI_LAVA_COMPARE] backend=%s record=%u source_ok=%u "
          "destination_ok=%u src=%u,%u %ux%u src_hash=%08x "
          "dst=%u,%u %ux%u dst_hash=%08x mismatches=%u "
-         "low_byte_mismatches=%u high_byte_mismatches=%u color=%06x "
+         "low_byte_mismatches=%u high_byte_mismatches=%u "
+         "opaque_words=%u transparent_words=%u color=%06x "
          "mode=%u depth=%u requested_dither=%u effective_dither=%u blend=%d "
+         "sprite=%u "
          "page=%u,%u clut=%u,%u uv0=%u,%u uv3=%u,%u "
          "limits=%u,%u,%u,%u window=%u,%u,%u,%u\n",
          backend, record, (unsigned)source_ok, (unsigned)destination_ok,
@@ -408,12 +433,14 @@ static void rhi_lava_diag_capture(void)
          RHI_LAVA_DIAG_W, RHI_LAVA_DIAG_H,
          destination_ok ? rhi_lava_diag_hash(vram, false) : 0u,
          mismatches, low_byte_mismatches, high_byte_mismatches,
+         opaque_words, transparent_words,
          rhi_lava_diag_last.color & 0xffffffu,
          (unsigned)rhi_lava_diag_last.texture_blend_mode,
          (unsigned)rhi_lava_diag_last.depth_shift,
          (unsigned)rhi_lava_diag_last.requested_dither,
          (unsigned)rhi_lava_diag_last.effective_dither,
          rhi_lava_diag_last.blend_mode,
+         (unsigned)rhi_lava_diag_last.is_sprite,
          rhi_lava_diag_last.texpage_x, rhi_lava_diag_last.texpage_y,
          rhi_lava_diag_last.clut_x, rhi_lava_diag_last.clut_y,
          rhi_lava_diag_last.t0x, rhi_lava_diag_last.t0y,
@@ -1236,10 +1263,10 @@ void rhi_intf_push_quad(
          break;
    }
 
-   if (texture_blend_mode == RHI_LAVA_DIAG_RAW_TEXTURE &&
-       depth_shift == 0 &&
-       rhi_lava_diag_matches_quad(
-         p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y, is_sprite))
+   if (rhi_lava_diag_matches_writer(
+         p0x, p0y, p1x, p1y, p2x, p2y, p3x, p3y,
+         t0x, t0y, t1x, t1y, t2x, t2y, t3x, t3y,
+         texpage_x, texpage_y, texture_blend_mode, depth_shift))
    {
       rhi_lava_diag_last.color = c0;
       rhi_lava_diag_last.texpage_x = texpage_x;
@@ -1262,6 +1289,7 @@ void rhi_intf_push_quad(
       rhi_lava_diag_last.depth_shift = depth_shift;
       rhi_lava_diag_last.requested_dither = requested_dither;
       rhi_lava_diag_last.effective_dither = dither;
+      rhi_lava_diag_last.is_sprite = is_sprite;
       rhi_lava_diag_last.blend_mode = blend_mode;
       rhi_lava_diag_pending = true;
    }
