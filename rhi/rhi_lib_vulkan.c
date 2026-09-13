@@ -5125,6 +5125,10 @@ static const DeviceFeatures *device_get_device_features(Device *self) { return &
        * blocks covered by queued primitives separately so empty gaps do not
        * become rendered texture content when the pass is submitted. */
       uint32_t pending_fragment_write[FBATLAS_BLOCK_WORDS];
+      /* Diagnostic-only sequence counters. They deliberately reset with the
+       * renderer so a fresh log starts at event one after reset/recreation. */
+      unsigned diag_frame;
+      unsigned diag_indexed_event;
       Renderer *listener;
 
       /* Retained CLUT selection (see fbatlas_palette_preserve). valid: a
@@ -5286,6 +5290,8 @@ static StatusFlags *fbatlas_info(FBAtlas *self,
          a->fb_info[i] = STATUS_FB_PREFER;
       memset(a->pending_fragment_write, 0,
             sizeof(a->pending_fragment_write));
+      a->diag_frame = 0;
+      a->diag_indexed_event = 0;
       a->listener = NULL;
       a->palette_cache_x = 0;
       a->palette_cache_y = 0;
@@ -18969,8 +18975,76 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
          }
    }
 
+   struct FBAtlasDiagSummary
+   {
+      unsigned ownership[4];
+      unsigned rendered;
+      unsigned pending;
+      StatusFlags flags;
+   };
+
+   static void fbatlas_diag_summarize(FBAtlas *self, const TTRect *rect,
+         struct FBAtlasDiagSummary *summary)
+   {
+      unsigned xbegin, xend, ybegin, yend, x, y;
+
+      memset(summary, 0, sizeof(*summary));
+      if (!rect->width || !rect->height)
+         return;
+
+      xbegin = rect->x / BLOCK_WIDTH;
+      xend = (rect->x + rect->width - 1) / BLOCK_WIDTH;
+      ybegin = rect->y / BLOCK_HEIGHT;
+      yend = (rect->y + rect->height - 1) / BLOCK_HEIGHT;
+
+      for (y = ybegin; y <= yend; y++)
+         for (x = xbegin; x <= xend; x++)
+         {
+            StatusFlags status = *fbatlas_info(self, x, y);
+            summary->ownership[status & STATUS_OWNERSHIP_MASK]++;
+            summary->rendered += (status & STATUS_TEXTURE_RENDERED) != 0;
+            summary->pending += fbatlas_block_test(
+                  self->pending_fragment_write, x, y);
+            summary->flags |= status;
+         }
+   }
+
+   static void fbatlas_diag_sync_indexed(FBAtlas *self, unsigned event,
+         const char *kind, Domain domain, const TTRect *rect)
+   {
+      struct FBAtlasDiagSummary before, after;
+      int scaled_before = Rect2DVec_size(
+            &self->listener->queue.scaled_resolves);
+      int unscaled_before = Rect2DVec_size(
+            &self->listener->queue.unscaled_resolves);
+
+      fbatlas_diag_summarize(self, rect, &before);
+      fbatlas_sync_domain(self, domain, rect);
+      fbatlas_diag_summarize(self, rect, &after);
+
+      if (log_cb)
+         log_cb(RETRO_LOG_INFO,
+               "[VK_INDEX_SYNC] frame=%u event=%u kind=%s domain=%u "
+               "rect=%u,%u %ux%u "
+               "own_before=%u,%u,%u,%u own_after=%u,%u,%u,%u "
+               "flags_before=%04x flags_after=%04x "
+               "rendered=%u/%u pending=%u/%u queues=%d,%d->%d,%d\n",
+               self->diag_frame, event, kind, (unsigned)domain,
+               rect->x, rect->y, rect->width, rect->height,
+               before.ownership[0], before.ownership[1],
+               before.ownership[2], before.ownership[3],
+               after.ownership[0], after.ownership[1],
+               after.ownership[2], after.ownership[3],
+               (unsigned)before.flags, (unsigned)after.flags,
+               before.rendered, after.rendered,
+               before.pending, after.pending,
+               scaled_before, unscaled_before,
+               Rect2DVec_size(&self->listener->queue.scaled_resolves),
+               Rect2DVec_size(&self->listener->queue.unscaled_resolves));
+   }
+
    static void fbatlas_read_texture(FBAtlas *self, Domain domain,
-         bool read_palette)
+         bool read_palette, unsigned diag_event)
    {
       TTRect shifted = self->renderpass.texture_window;
       bool palette;
@@ -18989,13 +19063,23 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       shifted.y += self->renderpass.texture_offset_y;
 
       /* Domain domain = palette ? Domain_Unscaled : fbatlas_find_suitable_domain(self, shifted); */
-      fbatlas_sync_domain(self, domain, &shifted);
+      if (diag_event)
+         fbatlas_diag_sync_indexed(self, diag_event, "texture", domain,
+               &shifted);
+      else
+         fbatlas_sync_domain(self, domain, &shifted);
 
       { TTRect palette_rect = { self->renderpass.palette_offset_x, self->renderpass.palette_offset_y,
          self->renderpass.texture_mode == TextureMode_Palette8bpp ? 256u : 16u, 1 };
 
       if (palette && read_palette)
-         fbatlas_sync_domain(self, domain, &palette_rect);
+      {
+         if (diag_event)
+            fbatlas_diag_sync_indexed(self, diag_event, "palette", domain,
+                  &palette_rect);
+         else
+            fbatlas_sync_domain(self, domain, &palette_rect);
+      }
 
       if (domain == Domain_Scaled && self->listener->scaling > 1)
       {
@@ -19423,6 +19507,7 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
          Domain domain,
          const TTRect *rect)
    {
+      unsigned diag_event = 0;
       bool reads_window = self->renderpass.texture_mode != TextureMode_None;
       bool reads_palette = false;
       bool palette_retained = false;
@@ -19471,13 +19556,56 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
          { const TTRect palette_rect = { self->renderpass.palette_offset_x, self->renderpass.palette_offset_y,
             self->renderpass.texture_mode == TextureMode_Palette8bpp ? 256u : 16u, 1 };
 
+         if (reads_palette && self->diag_indexed_event < 4096u)
+         {
+            struct FBAtlasDiagSummary texture_summary;
+            struct FBAtlasDiagSummary palette_summary;
+            bool texture_overlap;
+            bool palette_overlap;
+
+            diag_event = ++self->diag_indexed_event;
+            texture_overlap = fbatlas_inside_render_pass(self, &shifted);
+            palette_overlap = !palette_retained &&
+                  fbatlas_inside_render_pass(self, &palette_rect);
+            fbatlas_diag_summarize(self, &shifted, &texture_summary);
+            fbatlas_diag_summarize(self, &palette_rect, &palette_summary);
+
+            if (log_cb)
+               log_cb(RETRO_LOG_INFO,
+                     "[VK_INDEX_READ] frame=%u event=%u mode=%u domain=%u "
+                     "inside=%u overlap=%u,%u retained=%u "
+                     "tex=%u,%u %ux%u tex_own=%u,%u,%u,%u "
+                     "tex_rendered=%u tex_pending=%u "
+                     "clut=%u,%u %ux%u clut_own=%u,%u,%u,%u "
+                     "clut_rendered=%u clut_pending=%u dst=%u,%u %ux%u\n",
+                     self->diag_frame, diag_event,
+                     (unsigned)self->renderpass.texture_mode,
+                     (unsigned)domain, (unsigned)self->renderpass.inside,
+                     (unsigned)texture_overlap, (unsigned)palette_overlap,
+                     (unsigned)palette_retained,
+                     shifted.x, shifted.y, shifted.width, shifted.height,
+                     texture_summary.ownership[0],
+                     texture_summary.ownership[1],
+                     texture_summary.ownership[2],
+                     texture_summary.ownership[3],
+                     texture_summary.rendered, texture_summary.pending,
+                     palette_rect.x, palette_rect.y,
+                     palette_rect.width, palette_rect.height,
+                     palette_summary.ownership[0],
+                     palette_summary.ownership[1],
+                     palette_summary.ownership[2],
+                     palette_summary.ownership[3],
+                     palette_summary.rendered, palette_summary.pending,
+                     rect->x, rect->y, rect->width, rect->height);
+         }
+
          if (fbatlas_inside_render_pass(self, &shifted) ||
              (reads_palette && !palette_retained && fbatlas_inside_render_pass(self, &palette_rect)))
             fbatlas_flush_render_pass(self);
 
          /* A retained palette is not read from VRAM, so it takes no atlas
           * hazards; the window still does. */
-         fbatlas_read_texture(self, domain, !palette_retained);
+         fbatlas_read_texture(self, domain, !palette_retained, diag_event);
          }
       }
 
@@ -20453,6 +20581,8 @@ void rhi_vulkan_prepare_frame(void)
     * don't dereference it. */
    if (renderer == NULL)
       return;
+
+   renderer->atlas.diag_frame++;
 
    renderer->scaled_uv_offset = scaled_uv_offset;
    renderer->primitive_filter_mode = (FilterMode)(filter_mode);
