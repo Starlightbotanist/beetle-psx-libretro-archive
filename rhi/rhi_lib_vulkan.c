@@ -9267,6 +9267,65 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
     * them produced white output with dither speckle. The real defect
     * is Vulkan-side stale unscaled-domain content under the sampled
     * rect, tracked separately. */
+   if (psx_pgxp_color &&
+       self->render_state.texture_color_modulate &&
+       self->render_state.texture_mode != TextureMode_None &&
+       hd_texture_vram.height > 0)
+   {
+      bool texture_feedback;
+      bool palette_feedback = false;
+      bool feedback;
+      bool route_allowed;
+      unsigned mode = (unsigned)self->render_state.texture_mode;
+      static unsigned nonfeedback_count[4];
+      static unsigned feedback_count[4];
+
+      texture_feedback = vram_prov_any(self,
+            (int)hd_texture_vram.x, (int)hd_texture_vram.y,
+            (int)hd_texture_vram.width + 1, (int)hd_texture_vram.height);
+      if (self->render_state.texture_mode != TextureMode_ABGR1555)
+      {
+         unsigned pal_w = self->render_state.texture_mode ==
+               TextureMode_Palette8bpp ? 256u : 16u;
+         palette_feedback = vram_prov_any(self,
+               (int)self->render_state.palette_offset_x,
+               (int)self->render_state.palette_offset_y,
+               (int)pal_w, 1);
+      }
+
+      feedback = texture_feedback || palette_feedback;
+      route_allowed = self->render_state.texture_mode == TextureMode_ABGR1555;
+      if ((feedback && feedback_count[mode] < 512u) ||
+          (!feedback && nonfeedback_count[mode] < 64u))
+      {
+         fprintf(stderr,
+               "[VK_HDR_FEEDBACK_ROUTE] mode=%u shift=%u tex_fb=%u pal_fb=%u "
+               "allow=%u arm=%u tex=(%u,%u %ux%u) clut=(%u,%u) "
+               "dst=(%u,%u %ux%u) scaled=%u filter=%u dither=%u "
+               "primitive=%u semi=%u shade=(%.3f,%.3f,%.3f) param=0x%04x\n",
+               mode, shift, texture_feedback, palette_feedback,
+               route_allowed, route_allowed && feedback,
+               (unsigned)hd_texture_vram.x, (unsigned)hd_texture_vram.y,
+               (unsigned)hd_texture_vram.width + 1,
+               (unsigned)hd_texture_vram.height,
+               (unsigned)self->render_state.palette_offset_x,
+               (unsigned)self->render_state.palette_offset_y,
+               (unsigned)rect.x, (unsigned)rect.y,
+               (unsigned)rect.width, (unsigned)rect.height,
+               scaled_read, filtering, self->render_state.primitive_dither,
+               (unsigned)self->render_state.primitive_type,
+               (unsigned)self->render_state.semi_transparent,
+               vertices[0].cf[0] * 255.0f,
+               vertices[0].cf[1] * 255.0f,
+               vertices[0].cf[2] * 255.0f,
+               (unsigned)(uint16_t)param);
+      }
+
+      if (feedback)
+         feedback_count[mode]++;
+      else
+         nonfeedback_count[mode]++;
+   }
    if ((!psx_pgxp_color ||
         self->render_state.texture_mode == TextureMode_ABGR1555) &&
        self->render_state.texture_color_modulate &&
