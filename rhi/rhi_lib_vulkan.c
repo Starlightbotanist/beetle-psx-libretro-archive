@@ -9055,6 +9055,21 @@ static bool renderer_ensure_scaled_read_snapshot(Renderer *self)
    return true;
 }
 
+static bool vertices_have_neutral_modulation(const Vertex *vertices,
+      unsigned count)
+{
+   const float neutral = 128.0f / 255.0f;
+   unsigned i;
+
+   for (i = 0; i < count; i++)
+      if (vertices[i].cf[0] != neutral ||
+          vertices[i].cf[1] != neutral ||
+          vertices[i].cf[2] != neutral)
+         return false;
+
+   return true;
+}
+
 static void renderer_build_attribs(Renderer *self, BufferVertex *output, const Vertex *vertices, unsigned count, HdTextureHandle *hd_texture_index_out,
    bool *filtering_out, bool *scaled_read_out, unsigned *shift_out, bool *offset_uv_out){
       int16_t param;
@@ -9242,15 +9257,16 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    /* Framebuffer-feedback modulation (Vulkan port of the GL change): when
     * the sampled texture or palette contains GPU-rendered VRAM data, tell
     * the shader that its texels are RGB5 hardware data. The standard path
-    * reproduces the PlayStation GPU's fixed-point modulation. Accepted HDR
-    * instead reconstructs the RGB5 texel before precise float modulation,
-    * preserving the wide vertex colour and FP16 result. */
-   /* Tomb Raider 2 proved that precise-colour indexed feedback must not
-    * enter the fixed-point modulation and dither return path: doing so
-    * turned its 4bpp framebuffer refraction white with speckle. The HDR
-    * shader path now uses this flag only to reconstruct its RGB5 source,
-    * then continues through the existing precise float modulation. */
-   if ((!psx_pgxp_color || psx_hdr_active) &&
+    * reproduces the PlayStation GPU's fixed-point modulation. */
+   /* Under precise colour, reconstruct only exact identity modulation. It
+    * makes a neutral 0x80 draw preserve the same full-range RGB5 value as
+    * the established higher-colour SDR path, without promoting the decoded
+    * CPU palette of a genuinely shaded indexed texture. Tomb Raider 2 uses
+    * the latter for its 4bpp framebuffer-refraction water. Check every
+    * vertex's effective shader colour so Gouraud and recovered PGXP colours
+    * cannot be misclassified from vertex zero or the packed GP0 bytes. */
+   if ((!psx_pgxp_color ||
+        vertices_have_neutral_modulation(vertices, count)) &&
        self->render_state.texture_color_modulate &&
        self->render_state.texture_mode != TextureMode_None &&
        hd_texture_vram.height > 0)
