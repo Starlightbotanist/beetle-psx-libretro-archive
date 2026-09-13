@@ -6614,6 +6614,19 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
 /* 3 LSBs are ignored. */
 #define FBCOLOR_TO_RGBA8(color) ((color) & 0xfff8f8f8u)
 
+/* Temporary route diagnostic for the Silent Hill intro. The visual shader
+ * marker below distinguishes native-color state at the actual flat fragment;
+ * these bounded logs establish the matching CPU-side frame latch and queued
+ * parameter word without changing the release fix branch. */
+#define VK_NATIVE_ROUTE_DIAG_LIMIT 64
+static unsigned vk_native_route_frame_count;
+static unsigned vk_native_route_quad_count;
+
+static bool vk_native_route_is_near_white(uint32_t color)
+{
+   return (color & 0x00f8f8f8u) == 0x00f8f8f8u;
+}
+
 static INLINE void fbcolor_to_rgba32f(float *v, uint32_t color)
 {
    /* 3 LSBs are ignored. */
@@ -6660,6 +6673,9 @@ static void renderer_init(Renderer *self,
    self->primitive_index = 0;
    self->render_pass_is_feedback = false;
    self->quad.data = NULL;
+
+   vk_native_route_frame_count = 0;
+   vk_native_route_quad_count = 0;
 
    /* ImageHandle is now a plain struct with no default member initializer;
     * null every handle member so conditional assignment and ~Renderer's
@@ -9302,6 +9318,28 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
       param = (int16_t)((uint16_t)param | 0x0400u);
       if (self->render_state.dither_native_resolution)
          param = (int16_t)((uint16_t)param | 0x4000u);
+   }
+
+   if (self->render_state.texture_mode == TextureMode_None && count == 4 &&
+       rect.width >= 256 && rect.height >= 160 &&
+       vk_native_route_is_near_white(vertices[0].color) &&
+       vk_native_route_is_near_white(vertices[1].color) &&
+       vk_native_route_is_near_white(vertices[2].color) &&
+       vk_native_route_is_near_white(vertices[3].color) &&
+       vk_native_route_quad_count < VK_NATIVE_ROUTE_DIAG_LIMIT)
+   {
+      LOGI("[VK_NATIVE_ROUTE] queue quad=%u frame=%u rect=%u,%u %ux%u "
+            "native=%u dither_space_native=%u primitive_dtd=%u "
+            "param=0x%04x colors=%08x,%08x,%08x,%08x\n",
+            vk_native_route_quad_count, vk_native_route_frame_count,
+            rect.x, rect.y, rect.width, rect.height,
+            self->render_state.native_color ? 1u : 0u,
+            self->render_state.dither_native_resolution ? 1u : 0u,
+            self->render_state.primitive_dither ? 1u : 0u,
+            (unsigned)(uint16_t)param,
+            (unsigned)vertices[0].color, (unsigned)vertices[1].color,
+            (unsigned)vertices[2].color, (unsigned)vertices[3].color);
+      vk_native_route_quad_count++;
    }
 
    { unsigned i; for (i = 0; i < count; i++) {
@@ -20468,6 +20506,18 @@ void rhi_vulkan_prepare_frame(void)
       psx_color_format == 0 && dither_mode != DITHER_OFF;
    renderer->render_state.dither_native_resolution =
       dither_mode == DITHER_NATIVE;
+   if (vk_native_route_frame_count < 8 ||
+       (vk_native_route_frame_count % 120u) == 0u)
+   {
+      LOGI("[VK_NATIVE_ROUTE] frame=%u native=%u dither_mode=%d "
+            "dither_space_native=%u color_format=%d scale=%u msaa=%u\n",
+            vk_native_route_frame_count,
+            renderer->render_state.native_color ? 1u : 0u,
+            (int)dither_mode,
+            renderer->render_state.dither_native_resolution ? 1u : 0u,
+            psx_color_format, renderer->scaling, renderer->msaa);
+   }
+   vk_native_route_frame_count++;
 }
 
 static ScanoutMode get_scanout_mode(bool bpp24)

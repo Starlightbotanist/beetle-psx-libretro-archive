@@ -167,6 +167,18 @@ void main()
 	FragColor = vec4((PGXP_FOG != 0) ? pgxp_fog_mix(vColor.rgb, vFog) : vColor.rgb, vColor.a);
 #endif
 
+#ifndef TEXTURED
+	/* Temporary Silent Hill route marker. A large near-white flat primitive
+	 * will appear magenta if PARAM_NATIVE_COLOR reached this fragment and cyan
+	 * if it did not. White means this shader output is not the final writer. */
+	if (all(greaterThanEqual(FragColor.rgb, vec3(0.96875))))
+	{
+		FragColor.rgb = primitive_native_color() ?
+			vec3(1.0, 0.0, 1.0) : vec3(0.0, 1.0, 1.0);
+		return;
+	}
+#endif
+
 	if (primitive_native_color())
 	{
 		/* A raw texel is already the exact 8-bit expansion of a PS1 RGB5
