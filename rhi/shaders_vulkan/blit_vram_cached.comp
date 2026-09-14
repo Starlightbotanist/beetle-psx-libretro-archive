@@ -12,12 +12,12 @@ layout(local_size_x = 128) in;
 
 #if defined(SCALED)
 #if defined(MSAA)
-layout(set = 0, binding = 0, SCALED_STORE_FMT) uniform image2DMS uFramebuffer;
+layout(set = 0, binding = 0, SCALED_STORE_FMT) coherent uniform image2DMS uFramebuffer;
 #else
-layout(set = 0, binding = 0, SCALED_STORE_FMT) uniform image2D uFramebuffer;
+layout(set = 0, binding = 0, SCALED_STORE_FMT) coherent uniform image2D uFramebuffer;
 #endif
 #elif defined(UNSCALED)
-layout(set = 0, binding = 0, r32ui) uniform uimage2D uFramebuffer;
+layout(set = 0, binding = 0, r32ui) coherent uniform uimage2D uFramebuffer;
 #else
 #error "Invalid defines."
 #endif
@@ -110,4 +110,3 @@ void main()
 		}
 	}
 }
-
