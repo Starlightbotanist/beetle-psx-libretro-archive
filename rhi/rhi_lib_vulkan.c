@@ -62,6 +62,7 @@ extern int   psx_video_cable;    /* 0 = off, 1 = S-Video, 2 = composite, 3 = RF,
 extern float psx_phase_error;    /* decoder carrier misalignment, cycles */
 extern int   psx_black_setup;    /* NTSC pedestal mismatch: 0 none, 1 lifted, 2 crushed */
 extern retro_log_printf_t log_cb;
+extern retro_input_state_t dbg_input_state_cb;
 extern int   psx_hdr_overbright_hot;   /* additive/sub source: 0 clamped, 1 hot */
 extern int   psx_pgxp_color;           /* PGXP precise colour: vertex colour may exceed 1.0 on fp16 */
 extern int   psx_pgxp_fog;             /* PGXP linear-light depth cue; effective only with precise colour */
@@ -494,6 +495,77 @@ retro_log_printf_t libretro_log;
 
 #define LOGE(...) do { if (libretro_log) libretro_log(RETRO_LOG_ERROR, __VA_ARGS__); } while(0)
 #define LOGI(...) do { if (libretro_log) libretro_log(RETRO_LOG_INFO, __VA_ARGS__); } while(0)
+
+/* Observation-only counters for the Silent Hill intermittent-static
+ * diagnostic. They deliberately live outside Renderer/FBAtlas so they cannot
+ * affect renderer lifetime, savestates, hazard state, or command ordering. */
+struct VulkanRenderDiagnostic
+{
+   uint64_t frame;
+   unsigned epoch;
+   bool active;
+   bool marker_down;
+
+   unsigned triangles;
+   unsigned quads;
+   unsigned lines;
+   unsigned fills;
+   unsigned copies;
+   unsigned uploads;
+   unsigned readbacks;
+
+   unsigned texture_none;
+   unsigned texture_direct;
+   unsigned texture_8bpp;
+   unsigned texture_4bpp;
+   unsigned semi_transparent;
+   unsigned mask_tests;
+   unsigned mask_sets;
+   unsigned dithered;
+
+   unsigned render_passes;
+   unsigned feedback_passes;
+   unsigned load_passes;
+   unsigned clear_passes;
+   uint64_t render_pixels;
+   unsigned snapshot_calls;
+   unsigned snapshot_rects;
+   uint64_t snapshot_pixels;
+
+   unsigned hazard_calls;
+   uint32_t hazard_flags;
+   unsigned atlas_reads[2][4];
+   uint64_t atlas_read_pixels[2];
+   unsigned atlas_writes[2][4];
+   uint64_t atlas_write_pixels[2];
+   unsigned sync_calls[2];
+   unsigned sync_resolves[2];
+   uint64_t sync_pixels[2];
+   unsigned texture_reads[2];
+   unsigned resolves[2];
+   unsigned blits[2];
+   unsigned scanout_cached;
+   unsigned scanout_new;
+
+   unsigned outcome;
+   unsigned output_width;
+   unsigned output_height;
+   unsigned output_format;
+   unsigned display_x;
+   unsigned display_y;
+   unsigned display_width;
+   unsigned display_height;
+   unsigned scaling;
+   unsigned msaa;
+   unsigned hdr;
+};
+
+static struct VulkanRenderDiagnostic vk_render_diag;
+#define VK_RENDER_DIAG_HISTORY 64
+static struct VulkanRenderDiagnostic
+      vk_render_diag_history[VK_RENDER_DIAG_HISTORY];
+static unsigned vk_render_diag_history_head;
+static unsigned vk_render_diag_history_count;
 
 #ifdef _MSC_VER
 #endif
@@ -8357,7 +8429,14 @@ static ImageHandle renderer_scanout_to_texture(Renderer *self)
    }
 
    if (ih_is_valid(&self->last_scanout))
+   {
+      if (vk_render_diag.active)
+         vk_render_diag.scanout_cached++;
       return self->last_scanout;
+   }
+
+   if (vk_render_diag.active)
+      vk_render_diag.scanout_new++;
 
    self->render_state.display_fb_rect = renderer_compute_vram_framebuffer_rect(self);
    { TTRect *rect = &self->render_state.display_fb_rect;
@@ -8795,6 +8874,12 @@ static void renderer_hazard(Renderer *self, StatusFlags flags)
    VkPipelineStageFlags dst_stages = 0;
    VkAccessFlags dst_access = 0;
 
+   if (vk_render_diag.active)
+   {
+      vk_render_diag.hazard_calls++;
+      vk_render_diag.hazard_flags |= (uint32_t)flags;
+   }
+
    if (flags & (STATUS_FRAGMENT_FB_READ | STATUS_FRAGMENT_SFB_READ))
       src_stages |= VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
    if (flags & (STATUS_FRAGMENT_FB_WRITE | STATUS_FRAGMENT_SFB_WRITE))
@@ -8885,6 +8970,8 @@ static void renderer_flush_resolves(Renderer *self)
          commandbuffer_set_storage_texture(cbh_get(&self->cmd), 0, 0, iv_get(imageview_vec_at(&self->scaled_views, 0)));
 
       size = Rect2DVec_size(&self->queue.scaled_resolves);
+      if (vk_render_diag.active)
+         vk_render_diag.resolves[Domain_Scaled] += size;
       { unsigned i; for (i = 0; i < size; i += 1024) {
          void * ptr;
          unsigned to_run = min_(size - i, 1024u);
@@ -8915,6 +9002,8 @@ static void renderer_flush_resolves(Renderer *self)
          commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 1, iv_get(imageview_vec_at(&self->scaled_views, 0)), StockSampler_NearestClamp);
 
       size = Rect2DVec_size(&self->queue.unscaled_resolves);
+      if (vk_render_diag.active)
+         vk_render_diag.resolves[Domain_Unscaled] += size;
       { unsigned i; for (i = 0; i < size; i += 1024) {
          void * ptr;
          unsigned to_run = min_(size - i, 1024u);
@@ -9766,6 +9855,12 @@ static void renderer_snapshot_scaled_texture_reads(Renderer *self)
    if (Rect2DVec_empty(&self->queue.scaled_texture_reads))
       return;
 
+   if (vk_render_diag.active)
+   {
+      vk_render_diag.snapshot_calls++;
+      vk_render_diag.snapshot_rects += Rect2DVec_size(&self->queue.scaled_texture_reads);
+   }
+
    src = self->msaa > 1 ? ih_get(&self->scaled_framebuffer_msaa) :
          ih_get(&self->scaled_framebuffer);
    dst = self->msaa > 1 ? ih_get(&self->scaled_framebuffer) :
@@ -9805,6 +9900,10 @@ static void renderer_snapshot_scaled_texture_reads(Renderer *self)
          rect->extent.width * self->scaling,
          rect->extent.height * self->scaling, 1
       };
+
+      if (vk_render_diag.active)
+         vk_render_diag.snapshot_pixels +=
+               (uint64_t)extent.width * (uint64_t)extent.height;
 
       if (self->msaa > 1)
          commandbuffer_resolve_image(cbh_get(&self->cmd),
@@ -9876,6 +9975,20 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
 
    info.render_area.offset.x = (int)(rect->x * self->scaling); info.render_area.offset.y = (int)(rect->y * self->scaling);
    info.render_area.extent.width = rect->width * self->scaling; info.render_area.extent.height = rect->height * self->scaling;
+
+   if (vk_render_diag.active)
+   {
+      vk_render_diag.render_passes++;
+      if (self->render_pass_is_feedback)
+         vk_render_diag.feedback_passes++;
+      if (clear_candidate)
+         vk_render_diag.clear_passes++;
+      else
+         vk_render_diag.load_passes++;
+      vk_render_diag.render_pixels +=
+            (uint64_t)info.render_area.extent.width *
+            (uint64_t)info.render_area.extent.height;
+   }
 
    /* The primitives in this pass may sample the scaled framebuffer as a texture
     * (scaled_read: a primitive that textures from previously-rendered content),
@@ -10325,6 +10438,8 @@ static void renderer_flush_blit(Renderer *self,
    }
 
    size = BlitInfoVec_size(infos);
+   if (vk_render_diag.active)
+      vk_render_diag.blits[scaled ? Domain_Scaled : Domain_Unscaled] += size;
    scale = scaled ? self->scaling : 1u;
    { unsigned i; for (i = 0; i < size; i += 512) {
       unsigned to_blit = min_(size - i, 512u);
@@ -18996,6 +19111,9 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
    {
       TTRect shifted = self->renderpass.texture_window;
       bool palette;
+
+      if (vk_render_diag.active)
+         vk_render_diag.texture_reads[domain]++;
       switch (self->renderpass.texture_mode)
       {
          case TextureMode_Palette4bpp:
@@ -19039,6 +19157,12 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
    {
       unsigned xend;
       unsigned xbegin;
+      if (vk_render_diag.active && rect->width && rect->height)
+      {
+         vk_render_diag.atlas_writes[domain][stage]++;
+         vk_render_diag.atlas_write_pixels[domain] +=
+               (uint64_t)rect->width * (uint64_t)rect->height;
+      }
       if (fbatlas_inside_render_pass(self, rect))
          fbatlas_flush_render_pass(self);
 
@@ -19110,6 +19234,12 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
    {
       unsigned xend;
       unsigned xbegin;
+      if (vk_render_diag.active && rect->width && rect->height)
+      {
+         vk_render_diag.atlas_reads[domain][stage]++;
+         vk_render_diag.atlas_read_pixels[domain] +=
+               (uint64_t)rect->width * (uint64_t)rect->height;
+      }
       if (fbatlas_inside_render_pass(self, rect))
          fbatlas_flush_render_pass(self);
 
@@ -19176,6 +19306,8 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       unsigned xbegin;
       unsigned ownership;
       unsigned write_domains;
+      if (vk_render_diag.active)
+         vk_render_diag.sync_calls[domain]++;
       if (fbatlas_inside_render_pass(self, rect))
          fbatlas_flush_render_pass(self);
 
@@ -19199,6 +19331,13 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
        * not, so we have to resolve it. */
       if ((bits & dirty_bits) == 0)
          return;
+
+      if (vk_render_diag.active && rect->width && rect->height)
+      {
+         vk_render_diag.sync_resolves[domain]++;
+         vk_render_diag.sync_pixels[domain] +=
+               (uint64_t)rect->width * (uint64_t)rect->height;
+      }
 
       /* For scaled domain,
        * we need to blit from unscaled domain to scaled. */
@@ -19837,6 +19976,11 @@ static void vk_defer_dispatch(void *user, const rhi_defer_op_t *op)
 
 static void vk_context_reset(void)
 {
+   vk_render_diag.active = false;
+   vk_render_diag.marker_down = false;
+   vk_render_diag_history_head = 0;
+   vk_render_diag_history_count = 0;
+
    if (!environ_cb(RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE, (void**)&vulkan) || !vulkan)
       return;
 
@@ -19896,6 +20040,11 @@ static void vk_context_reset(void)
       return;
    }
 
+   vk_render_diag.epoch++;
+   LOGI("[VKINT] context-reset epoch=%u scaling=%u msaa=%u hdr=%u\n",
+         vk_render_diag.epoch, (unsigned)scaling, (unsigned)msaa,
+         psx_hdr_active ? 1u : 0u);
+
    tt_log_startup("vk renderer init: scaling=%u msaa=%u has_software_fb=%d\n",
          (unsigned)scaling, (unsigned)msaa, (int)has_software_fb);
 
@@ -19913,6 +20062,13 @@ static void vk_context_destroy(void)
 {
    if (device == NULL)
       return;
+
+   LOGI("[VKINT] context-destroy epoch=%u frame=%llu\n",
+         vk_render_diag.epoch, (unsigned long long)vk_render_diag.frame);
+   vk_render_diag.active = false;
+   vk_render_diag.marker_down = false;
+   vk_render_diag_history_head = 0;
+   vk_render_diag_history_count = 0;
 
    /* If the context is torn down mid-frame (e.g. a scale-factor change runs
     * check_variables -> SET_SYSTEM_AV_INFO between prepare_frame and
@@ -20447,6 +20603,136 @@ void rhi_vulkan_apply_pending_geometry(void)
    }
 }
 
+static void vk_render_diag_begin(void)
+{
+   uint64_t frame = vk_render_diag.frame + 1;
+   unsigned epoch = vk_render_diag.epoch;
+   bool marker_down = vk_render_diag.marker_down;
+
+   memset(&vk_render_diag, 0, sizeof(vk_render_diag));
+   vk_render_diag.frame = frame;
+   vk_render_diag.epoch = epoch;
+   vk_render_diag.marker_down = marker_down;
+   vk_render_diag.active = true;
+}
+
+static void vk_render_diag_log(const struct VulkanRenderDiagnostic *diag)
+{
+   LOGI("[VKINT] f=%llu e=%u outcome=%u gp0=%u/%u/%u/%u/%u/%u/%u "
+        "tex=%u/%u/%u/%u semi=%u mask=%u/%u dith=%u "
+        "rp=%u/%u/%u/%u rp_px=%llu snap=%u/%u/%llu\n",
+        (unsigned long long)diag->frame, diag->epoch, diag->outcome,
+        diag->triangles, diag->quads, diag->lines, diag->fills,
+        diag->copies, diag->uploads, diag->readbacks,
+        diag->texture_none, diag->texture_direct, diag->texture_8bpp,
+        diag->texture_4bpp, diag->semi_transparent, diag->mask_tests,
+        diag->mask_sets, diag->dithered, diag->render_passes,
+        diag->feedback_passes, diag->load_passes, diag->clear_passes,
+        (unsigned long long)diag->render_pixels, diag->snapshot_calls,
+        diag->snapshot_rects, (unsigned long long)diag->snapshot_pixels);
+   LOGI("[VKINT] f=%llu haz=%u/0x%08x "
+        "read_u=%u/%u/%u/%u read_s=%u/%u/%u/%u read_px=%llu/%llu "
+        "write_u=%u/%u/%u/%u write_s=%u/%u/%u/%u write_px=%llu/%llu "
+        "sync_u=%u/%u/%llu sync_s=%u/%u/%llu texrd=%u/%u "
+        "resolve=%u/%u blit=%u/%u scan=%u/%u output=%ux%u/f%u "
+        "display=%u,%u,%u,%u cfg=%u/%u/%u\n",
+        (unsigned long long)diag->frame, diag->hazard_calls,
+        diag->hazard_flags,
+        diag->atlas_reads[Domain_Unscaled][Stage_Compute],
+        diag->atlas_reads[Domain_Unscaled][Stage_Transfer],
+        diag->atlas_reads[Domain_Unscaled][Stage_Fragment],
+        diag->atlas_reads[Domain_Unscaled][Stage_FragmentTexture],
+        diag->atlas_reads[Domain_Scaled][Stage_Compute],
+        diag->atlas_reads[Domain_Scaled][Stage_Transfer],
+        diag->atlas_reads[Domain_Scaled][Stage_Fragment],
+        diag->atlas_reads[Domain_Scaled][Stage_FragmentTexture],
+        (unsigned long long)diag->atlas_read_pixels[Domain_Unscaled],
+        (unsigned long long)diag->atlas_read_pixels[Domain_Scaled],
+        diag->atlas_writes[Domain_Unscaled][Stage_Compute],
+        diag->atlas_writes[Domain_Unscaled][Stage_Transfer],
+        diag->atlas_writes[Domain_Unscaled][Stage_Fragment],
+        diag->atlas_writes[Domain_Unscaled][Stage_FragmentTexture],
+        diag->atlas_writes[Domain_Scaled][Stage_Compute],
+        diag->atlas_writes[Domain_Scaled][Stage_Transfer],
+        diag->atlas_writes[Domain_Scaled][Stage_Fragment],
+        diag->atlas_writes[Domain_Scaled][Stage_FragmentTexture],
+        (unsigned long long)diag->atlas_write_pixels[Domain_Unscaled],
+        (unsigned long long)diag->atlas_write_pixels[Domain_Scaled],
+        diag->sync_calls[Domain_Unscaled],
+        diag->sync_resolves[Domain_Unscaled],
+        (unsigned long long)diag->sync_pixels[Domain_Unscaled],
+        diag->sync_calls[Domain_Scaled], diag->sync_resolves[Domain_Scaled],
+        (unsigned long long)diag->sync_pixels[Domain_Scaled],
+        diag->texture_reads[Domain_Unscaled],
+        diag->texture_reads[Domain_Scaled],
+        diag->resolves[Domain_Unscaled], diag->resolves[Domain_Scaled],
+        diag->blits[Domain_Unscaled], diag->blits[Domain_Scaled],
+        diag->scanout_cached, diag->scanout_new,
+        diag->output_width, diag->output_height, diag->output_format,
+        diag->display_x, diag->display_y, diag->display_width,
+        diag->display_height, diag->scaling, diag->msaa, diag->hdr);
+}
+
+static void vk_render_diag_finish(const ImageHandle *scanout,
+      unsigned outcome)
+{
+   bool marker_down = false;
+   bool marker_edge;
+   unsigned i;
+   unsigned oldest;
+
+   if (!vk_render_diag.active)
+      return;
+
+   if (dbg_input_state_cb)
+      marker_down = dbg_input_state_cb(0, RETRO_DEVICE_JOYPAD, 0,
+            RETRO_DEVICE_ID_JOYPAD_R3) != 0;
+   marker_edge = marker_down && !vk_render_diag.marker_down;
+   vk_render_diag.marker_down = marker_down;
+   vk_render_diag.outcome = outcome;
+   vk_render_diag.scaling = renderer ? renderer->scaling : 0;
+   vk_render_diag.msaa = renderer ? renderer->msaa : 0;
+   vk_render_diag.hdr = psx_hdr_active ? 1 : 0;
+
+   if (renderer)
+   {
+      vk_render_diag.display_x = renderer->render_state.display_fb_rect.x;
+      vk_render_diag.display_y = renderer->render_state.display_fb_rect.y;
+      vk_render_diag.display_width = renderer->render_state.display_fb_rect.width;
+      vk_render_diag.display_height = renderer->render_state.display_fb_rect.height;
+   }
+   if (scanout && ih_is_valid(scanout))
+   {
+      vk_render_diag.output_width = image_get_width(ih_get(scanout), 0);
+      vk_render_diag.output_height = image_get_height(ih_get(scanout), 0);
+      vk_render_diag.output_format = (unsigned)image_get_format(ih_get(scanout));
+   }
+
+   vk_render_diag.active = false;
+   vk_render_diag_history[vk_render_diag_history_head] = vk_render_diag;
+   vk_render_diag_history_head =
+         (vk_render_diag_history_head + 1) % VK_RENDER_DIAG_HISTORY;
+   if (vk_render_diag_history_count < VK_RENDER_DIAG_HISTORY)
+      vk_render_diag_history_count++;
+
+   if (marker_edge)
+   {
+      LOGI("[VKINT] marker=R3 frame=%llu epoch=%u dumping=%u\n",
+            (unsigned long long)vk_render_diag.frame,
+            vk_render_diag.epoch, vk_render_diag_history_count);
+      oldest = (vk_render_diag_history_head + VK_RENDER_DIAG_HISTORY -
+            vk_render_diag_history_count) % VK_RENDER_DIAG_HISTORY;
+      for (i = 0; i < vk_render_diag_history_count; i++)
+         vk_render_diag_log(&vk_render_diag_history[
+               (oldest + i) % VK_RENDER_DIAG_HISTORY]);
+   }
+   else if ((vk_render_diag.frame % 600) == 0)
+      LOGI("[VKINT] heartbeat frame=%llu epoch=%u history=%u cfg=%u/%u/%u\n",
+            (unsigned long long)vk_render_diag.frame, vk_render_diag.epoch,
+            vk_render_diag_history_count, vk_render_diag.scaling,
+            vk_render_diag.msaa, vk_render_diag.hdr);
+}
+
 void rhi_vulkan_prepare_frame(void)
 {
    if (device == NULL)
@@ -20475,6 +20761,8 @@ void rhi_vulkan_prepare_frame(void)
     * don't dereference it. */
    if (renderer == NULL)
       return;
+
+   vk_render_diag_begin();
 
    renderer->scaled_uv_offset = scaled_uv_offset;
    renderer->primitive_filter_mode = (FilterMode)(filter_mode);
@@ -20526,6 +20814,7 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
 
       /* printf("No PSX GPU display update; duping frame\n"); */
       renderer_flush(renderer);
+      vk_render_diag_finish(NULL, 1);
       video_refresh_cb(NULL, prev_frame_width, prev_frame_height, 0);
 
       inside_frame = false;
@@ -20595,6 +20884,7 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
       /* scanout is a borrowed handle (renderer_scanout_to_texture returns
        * self->last_scanout without adding a reference), so it must not be
        * released here -- match the normal path, which never resets it. */
+      vk_render_diag_finish(&scanout, 2);
       inside_frame = false;
       return;
    }
@@ -20623,6 +20913,7 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
    vulkan->set_image(vulkan->handle, image, 0,
          NULL, VK_QUEUE_FAMILY_IGNORED);
    renderer_flush(renderer);
+   vk_render_diag_finish(&scanout, 0);
 
    /* VKHOST_CORE_DUMP: readback through the core's own machinery. */
    if (getenv("VKHOST_CORE_DUMP"))
@@ -20833,6 +21124,38 @@ static void renderer_apply_blend_mode(Renderer *renderer, int blend_mode)
    }
 }
 
+static void vk_render_diag_count_primitive(TextureMode texture_mode,
+      bool dither, int blend_mode, bool mask_test, bool set_mask)
+{
+   if (!vk_render_diag.active)
+      return;
+
+   switch (texture_mode)
+   {
+      case TextureMode_ABGR1555:
+         vk_render_diag.texture_direct++;
+         break;
+      case TextureMode_Palette8bpp:
+         vk_render_diag.texture_8bpp++;
+         break;
+      case TextureMode_Palette4bpp:
+         vk_render_diag.texture_4bpp++;
+         break;
+      default:
+         vk_render_diag.texture_none++;
+         break;
+   }
+
+   if (blend_mode >= 0 && blend_mode <= 3)
+      vk_render_diag.semi_transparent++;
+   if (mask_test)
+      vk_render_diag.mask_tests++;
+   if (set_mask)
+      vk_render_diag.mask_sets++;
+   if (dither)
+      vk_render_diag.dithered++;
+}
+
 
 /* Fill Vertex::cf for `n` vertices from the caller's precise colours when
  * given, else from the packed bytes. 1.0 == 0xFF either way, so without
@@ -20894,6 +21217,11 @@ void rhi_vulkan_push_triangle(
 
    renderer_apply_blend_mode(renderer, blend_mode);
 
+   if (vk_render_diag.active)
+      vk_render_diag.triangles++;
+   vk_render_diag_count_primitive(renderer->render_state.texture_mode,
+         dither, blend_mode, mask_test, set_mask);
+
    renderer_set_primitive_type(renderer, PrimitiveType_Polygon);
 
    {
@@ -20945,6 +21273,11 @@ void rhi_vulkan_push_quad(
 
    renderer_apply_blend_mode(renderer, blend_mode);
 
+   if (vk_render_diag.active)
+      vk_render_diag.quads++;
+   vk_render_diag_count_primitive(renderer->render_state.texture_mode,
+         dither, blend_mode, mask_test, set_mask);
+
    if (is_sprite)
       renderer_set_primitive_type(renderer, PrimitiveType_Sprite);
    else if (may_be_2d)
@@ -20985,6 +21318,11 @@ void rhi_vulkan_push_line(
    renderer->render_state.force_mask_bit = set_mask;
    renderer_apply_blend_mode(renderer, blend_mode);
 
+   if (vk_render_diag.active)
+      vk_render_diag.lines++;
+   vk_render_diag_count_primitive(TextureMode_None, dither, blend_mode,
+         mask_test, set_mask);
+
    {
       Vertex vertices[2] = {
          { (float)(p0x), (float)(p0y), 1.0f, c0, 0, 0 },
@@ -21013,6 +21351,9 @@ void rhi_vulkan_load_image(
       rhi_defer_push_load_image(&defer, x, y, w, h, vram, mask_test, set_mask);
       return;
    }
+
+   if (vk_render_diag.active)
+      vk_render_diag.uploads++;
 
    { TTRect _ntu_rect; _ntu_rect.x = x; _ntu_rect.y = y; _ntu_rect.width = w; _ntu_rect.height = h;
      renderer_notify_texture_upload(renderer, _ntu_rect, vram); }
@@ -21098,6 +21439,8 @@ bool rhi_vulkan_read_vram(uint16_t x, uint16_t y,
 {
    if (!renderer)
       return false;
+   if (vk_render_diag.active)
+      vk_render_diag.readbacks++;
    {
       TTRect _r = { x, y, w, h };
       renderer_copy_vram_to_cpu_synchronous(renderer, &_r, vram);
@@ -21111,6 +21454,8 @@ void rhi_vulkan_fill_rect(uint32_t color,
 {
    if (renderer)
    {
+      if (vk_render_diag.active)
+         vk_render_diag.fills++;
       TTRect _r = { x, y, w, h };
       renderer_clear_rect(renderer, &_r, color);
    }
@@ -21123,6 +21468,8 @@ void rhi_vulkan_copy_rect(uint16_t src_x, uint16_t src_y,
 {
    if (!renderer)
       return;
+   if (vk_render_diag.active)
+      vk_render_diag.copies++;
    renderer->render_state.mask_test      = mask_test;
    renderer->render_state.force_mask_bit = set_mask;
    {
