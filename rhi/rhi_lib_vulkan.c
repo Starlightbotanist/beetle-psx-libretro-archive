@@ -13,6 +13,7 @@
 #include "rhi_defer.h"
 #include "tt_trace.h"
 #include <retro_inline.h>
+#include <features/features_cpu.h>
 #include <math.h>
 #include "rhi_tt.h"
 
@@ -499,6 +500,174 @@ retro_log_printf_t libretro_log;
 
 #define LOGE(...) do { if (libretro_log) libretro_log(RETRO_LOG_ERROR, __VA_ARGS__); } while(0)
 #define LOGI(...) do { if (libretro_log) libretro_log(RETRO_LOG_INFO, __VA_ARGS__); } while(0)
+
+/* VKFLASH diagnostic state. Keep this observation-only: the counters describe
+ * the existing pipeline, submit, fence and scanout lifecycle without adding a
+ * synchronization primitive or changing command ordering. */
+struct VkStaticFlashDiag
+{
+   uint64_t frame;
+   uint64_t pipeline_serial;
+   unsigned context_epoch;
+   unsigned prepare_sync_index;
+   unsigned sync_index_mask;
+   unsigned submit_calls;
+   unsigned submit_infos;
+   unsigned command_buffers;
+   unsigned wait_semaphores;
+   unsigned signal_semaphores;
+   unsigned queue_mask;
+   unsigned submit_failures;
+   uint64_t submit_total_us;
+   uint64_t submit_max_us;
+   unsigned pipeline_creates;
+   unsigned pipeline_failures;
+   uint64_t pipeline_total_us;
+   uint64_t pipeline_max_us;
+   unsigned command_begin_failures;
+   unsigned command_end_failures;
+   unsigned fence_wait_failures;
+   unsigned fence_reset_failures;
+   uint64_t frontend_wait_us;
+   uint64_t fence_wait_us;
+   VkImage last_scanout;
+};
+
+static struct VkStaticFlashDiag vkflash_diag;
+
+static uint64_t vkflash_elapsed_us(retro_time_t start)
+{
+   retro_time_t now = cpu_features_get_time_usec();
+   return now > start ? (uint64_t)(now - start) : 0;
+}
+
+static void vkflash_begin_frame(void)
+{
+   vkflash_diag.frame++;
+   vkflash_diag.submit_calls = 0;
+   vkflash_diag.submit_infos = 0;
+   vkflash_diag.command_buffers = 0;
+   vkflash_diag.wait_semaphores = 0;
+   vkflash_diag.signal_semaphores = 0;
+   vkflash_diag.queue_mask = 0;
+   vkflash_diag.submit_failures = 0;
+   vkflash_diag.submit_total_us = 0;
+   vkflash_diag.submit_max_us = 0;
+   vkflash_diag.pipeline_creates = 0;
+   vkflash_diag.pipeline_failures = 0;
+   vkflash_diag.pipeline_total_us = 0;
+   vkflash_diag.pipeline_max_us = 0;
+   vkflash_diag.command_begin_failures = 0;
+   vkflash_diag.command_end_failures = 0;
+   vkflash_diag.fence_wait_failures = 0;
+   vkflash_diag.fence_reset_failures = 0;
+   vkflash_diag.frontend_wait_us = 0;
+   vkflash_diag.fence_wait_us = 0;
+}
+
+static void vkflash_note_pipeline(const char *kind, uint64_t hash,
+      VkPipeline pipeline, VkResult result, uint64_t elapsed_us)
+{
+   vkflash_diag.pipeline_serial++;
+   vkflash_diag.pipeline_creates++;
+   vkflash_diag.pipeline_total_us += elapsed_us;
+   if (elapsed_us > vkflash_diag.pipeline_max_us)
+      vkflash_diag.pipeline_max_us = elapsed_us;
+   if (result != VK_SUCCESS)
+      vkflash_diag.pipeline_failures++;
+
+   LOGI("[VKFLASH] pipeline frame=%llu epoch=%u serial=%llu kind=%s "
+        "hash=%016llx us=%llu result=%d handle=%llx\n",
+         (unsigned long long)vkflash_diag.frame,
+         vkflash_diag.context_epoch,
+         (unsigned long long)vkflash_diag.pipeline_serial,
+         kind,
+         (unsigned long long)hash,
+         (unsigned long long)elapsed_us,
+         (int)result,
+         (unsigned long long)(uintptr_t)pipeline);
+}
+
+static void vkflash_note_submit(unsigned type, unsigned submit_infos,
+      unsigned command_buffers, unsigned waits, unsigned signals,
+      VkQueue queue, VkFence fence, VkResult result, uint64_t elapsed_us)
+{
+   vkflash_diag.submit_calls++;
+   vkflash_diag.submit_infos += submit_infos;
+   vkflash_diag.command_buffers += command_buffers;
+   vkflash_diag.wait_semaphores += waits;
+   vkflash_diag.signal_semaphores += signals;
+   if (type < 32)
+      vkflash_diag.queue_mask |= 1u << type;
+   vkflash_diag.submit_total_us += elapsed_us;
+   if (elapsed_us > vkflash_diag.submit_max_us)
+      vkflash_diag.submit_max_us = elapsed_us;
+
+   if (result != VK_SUCCESS)
+   {
+      vkflash_diag.submit_failures++;
+      LOGE("[VKFLASH] submit_error frame=%llu epoch=%u type=%u infos=%u "
+           "cmds=%u waits=%u signals=%u queue=%llx fence=%llx us=%llu result=%d\n",
+            (unsigned long long)vkflash_diag.frame,
+            vkflash_diag.context_epoch,
+            type, submit_infos, command_buffers, waits, signals,
+            (unsigned long long)(uintptr_t)queue,
+            (unsigned long long)(uintptr_t)fence,
+            (unsigned long long)elapsed_us,
+            (int)result);
+   }
+}
+
+static void vkflash_log_frame(const char *kind, unsigned final_sync_index,
+      int sync_slots, unsigned frame_context, VkImage image,
+      VkImage old_slot_image, VkImageView view, VkFormat format,
+      unsigned width, unsigned height)
+{
+   LOGI("[VKFLASH] frame=%llu epoch=%u kind=%s prep_sync=%u final_sync=%u "
+        "mask=%08x slots=%d frame_ctx=%u image=%llx view=%llx format=%d "
+        "size=%ux%u same_prev=%u same_slot=%u frontend_wait_us=%llu "
+        "fence_wait_us=%llu submits=%u infos=%u cmds=%u waits=%u signals=%u "
+        "queue_mask=%x submit_us=%llu submit_max_us=%llu submit_errors=%u "
+        "pipelines=%u pipeline_us=%llu pipeline_max_us=%llu pipeline_errors=%u "
+        "cmd_begin_errors=%u cmd_end_errors=%u fence_wait_errors=%u "
+        "fence_reset_errors=%u\n",
+         (unsigned long long)vkflash_diag.frame,
+         vkflash_diag.context_epoch,
+         kind,
+         vkflash_diag.prepare_sync_index,
+         final_sync_index,
+         vkflash_diag.sync_index_mask,
+         sync_slots,
+         frame_context,
+         (unsigned long long)(uintptr_t)image,
+         (unsigned long long)(uintptr_t)view,
+         (int)format,
+         width, height,
+         image != VK_NULL_HANDLE && image == vkflash_diag.last_scanout,
+         image != VK_NULL_HANDLE && image == old_slot_image,
+         (unsigned long long)vkflash_diag.frontend_wait_us,
+         (unsigned long long)vkflash_diag.fence_wait_us,
+         vkflash_diag.submit_calls,
+         vkflash_diag.submit_infos,
+         vkflash_diag.command_buffers,
+         vkflash_diag.wait_semaphores,
+         vkflash_diag.signal_semaphores,
+         vkflash_diag.queue_mask,
+         (unsigned long long)vkflash_diag.submit_total_us,
+         (unsigned long long)vkflash_diag.submit_max_us,
+         vkflash_diag.submit_failures,
+         vkflash_diag.pipeline_creates,
+         (unsigned long long)vkflash_diag.pipeline_total_us,
+         (unsigned long long)vkflash_diag.pipeline_max_us,
+         vkflash_diag.pipeline_failures,
+         vkflash_diag.command_begin_failures,
+         vkflash_diag.command_end_failures,
+         vkflash_diag.fence_wait_failures,
+         vkflash_diag.fence_reset_failures);
+
+   if (image != VK_NULL_HANDLE)
+      vkflash_diag.last_scanout = image;
+}
 
 #ifdef _MSC_VER
 #endif
@@ -14291,7 +14460,9 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    static VkPipeline commandbuffer_build_compute_pipeline(struct CommandBuffer *self,
          Hash hash)
    {
-      VkPipeline compute_pipeline;
+      retro_time_t start;
+      uint64_t elapsed_us;
+      VkPipeline compute_pipeline = VK_NULL_HANDLE;
       VkResult res;
       const Shader *shader = program_get_shader(self->current_program, ShaderStage_Compute);
       VkComputePipelineCreateInfo info = { VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO };
@@ -14329,12 +14500,15 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          }
       }
 
-
+      start = cpu_features_get_time_usec();
       res = vkCreateComputePipelines(device_get_device(self->device),
             device_get_pipeline_cache(self->device), 1, &info, NULL,
             &compute_pipeline);
+      elapsed_us = vkflash_elapsed_us(start);
+      vkflash_note_pipeline("compute", (uint64_t)hash, compute_pipeline, res,
+            elapsed_us);
       if (res != VK_SUCCESS)
-         LOGE("Failed to create compute pipeline!\n");
+         LOGE("Failed to create compute pipeline (code: %d).\n", (int)res);
 
       return program_add_pipeline(self->current_program, hash, compute_pipeline);
       }
@@ -14344,7 +14518,9 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
          Hash hash)
    {
       uint32_t attr_mask;
-      VkPipeline pipeline;
+      retro_time_t start;
+      uint64_t elapsed_us;
+      VkPipeline pipeline = VK_NULL_HANDLE;
       VkResult res;
       /* Viewport state */
       VkPipelineViewportStateCreateInfo vp = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
@@ -14506,11 +14682,14 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       pipe.pStages = stages;
       pipe.stageCount = num_stages;
 
-
+      start = cpu_features_get_time_usec();
       res = vkCreateGraphicsPipelines(device_get_device(self->device),
             device_get_pipeline_cache(self->device), 1, &pipe, NULL, &pipeline);
+      elapsed_us = vkflash_elapsed_us(start);
+      vkflash_note_pipeline("graphics", (uint64_t)hash, pipeline, res,
+            elapsed_us);
       if (res != VK_SUCCESS)
-         LOGE("Failed to create graphics pipeline!\n");
+         LOGE("Failed to create graphics pipeline (code: %d).\n", (int)res);
 
       return program_add_pipeline(self->current_program, hash, pipeline);
       }
@@ -15260,8 +15439,18 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
 
    static void commandbuffer_end(struct CommandBuffer *self)
    {
-      if (vkEndCommandBuffer(self->cmd) != VK_SUCCESS)
-         LOGE("Failed to end command buffer.\n");
+      VkResult result = vkEndCommandBuffer(self->cmd);
+      if (result != VK_SUCCESS)
+      {
+         vkflash_diag.command_end_failures++;
+         LOGE("[VKFLASH] command_end_error frame=%llu epoch=%u type=%u "
+              "command=%llx result=%d\n",
+               (unsigned long long)vkflash_diag.frame,
+               vkflash_diag.context_epoch,
+               (unsigned)self->type,
+               (unsigned long long)(uintptr_t)self->cmd,
+               (int)result);
+      }
 
       if (self->vbo_block.mapped)
          device_request_vertex_block_nolock(self->device, &self->vbo_block, 0);
@@ -16675,6 +16864,8 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
             VkResult result;
             VkQueue queue;
             VkFence cleared_fence;
+            retro_time_t start;
+            uint64_t elapsed_us;
       QueueData *data = device_get_queue_data(self, type);
       VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
 
@@ -16734,7 +16925,12 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
       }
 
       cleared_fence = fence ? fencemanager_request_cleared_fence(&self->managers.fence) : VK_NULL_HANDLE;
+      start = cpu_features_get_time_usec();
       result = vkQueueSubmit(queue, 1, &submit, cleared_fence);
+      elapsed_us = vkflash_elapsed_us(start);
+      vkflash_note_submit((unsigned)type, 1, 0,
+            submit.waitSemaphoreCount, submit.signalSemaphoreCount,
+            queue, cleared_fence, result, elapsed_us);
 
       if (result != VK_SUCCESS)
          LOGE("vkQueueSubmit failed (code: %d).\n", (int)(result));
@@ -16902,6 +17098,8 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
             VkFence cleared_fence;
             VkQueue queue;
             VkResult result;
+            retro_time_t start;
+            uint64_t elapsed_us;
       type = device_get_physical_queue_type(self, type);
 
       /* Always check if we need to flush pending transfers. */
@@ -17009,7 +17207,15 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
             break;
       }
 
+      start = cpu_features_get_time_usec();
       result = vkQueueSubmit(queue, VkSubmitInfoVec_size(&submits), VkSubmitInfoVec_data(&submits), cleared_fence);
+      elapsed_us = vkflash_elapsed_us(start);
+      vkflash_note_submit((unsigned)type,
+            (unsigned)VkSubmitInfoVec_size(&submits),
+            (unsigned)CommandBufferVec_size(&cmds),
+            (unsigned)(SemaphoreVec_size(&waits[0]) + SemaphoreVec_size(&waits[1])),
+            (unsigned)(SemaphoreVec_size(&signals[0]) + SemaphoreVec_size(&signals[1])),
+            queue, cleared_fence, result, elapsed_us);
       if (result != VK_SUCCESS)
          LOGE("vkQueueSubmit failed (code: %d).\n", (int)(result));
       cbhvec_clear(submissions);
@@ -17176,11 +17382,23 @@ static void fixup_src_stage(VkPipelineStageFlags *src_stages, bool fixup)
    static CommandBufferHandle device_request_command_buffer_nolock(Device *self,
          CommandBufferType type){
       struct CommandBuffer * _cb;
+      VkResult result;
       VkCommandBuffer cmd = command_pool_request_command_buffer(device_get_command_pool(self, type));
 
       VkCommandBufferBeginInfo info = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
       info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-      vkBeginCommandBuffer(cmd, &info);
+      result = vkBeginCommandBuffer(cmd, &info);
+      if (result != VK_SUCCESS)
+      {
+         vkflash_diag.command_begin_failures++;
+         LOGE("[VKFLASH] command_begin_error frame=%llu epoch=%u type=%u "
+              "command=%llx result=%d\n",
+               (unsigned long long)vkflash_diag.frame,
+               vkflash_diag.context_epoch,
+               (unsigned)type,
+               (unsigned long long)(uintptr_t)cmd,
+               (int)result);
+      }
       device_add_frame_counter_nolock(self);
       _cb = (struct CommandBuffer *)object_pool_raw_allocate(&self->handle_pool.command_buffers); commandbuffer_init(_cb, self, cmd, type);
       return cbh_make(_cb);
@@ -17384,14 +17602,38 @@ static void device_next_frame_context(Device *self)
    {
       if (!FenceVec_empty(&self->wait_fences))
       {
-         vkWaitForFences(self->device, FenceVec_size(&self->wait_fences), FenceVec_data(&self->wait_fences), VK_TRUE, UINT64_MAX);
+         retro_time_t start = cpu_features_get_time_usec();
+         VkResult result = vkWaitForFences(self->device,
+               FenceVec_size(&self->wait_fences),
+               FenceVec_data(&self->wait_fences), VK_TRUE, UINT64_MAX);
+         vkflash_diag.fence_wait_us += vkflash_elapsed_us(start);
+         if (result != VK_SUCCESS)
+         {
+            vkflash_diag.fence_wait_failures++;
+            LOGE("[VKFLASH] fence_wait_error frame=%llu epoch=%u count=%d result=%d\n",
+                  (unsigned long long)vkflash_diag.frame,
+                  vkflash_diag.context_epoch,
+                  FenceVec_size(&self->wait_fences),
+                  (int)result);
+         }
          FenceVec_clear(&self->wait_fences);
       }
 
       if (!FenceVec_empty(&self->recycle_fences))
       {
          int _i;
-         vkResetFences(self->device, FenceVec_size(&self->recycle_fences), FenceVec_data(&self->recycle_fences));
+         VkResult result = vkResetFences(self->device,
+               FenceVec_size(&self->recycle_fences),
+               FenceVec_data(&self->recycle_fences));
+         if (result != VK_SUCCESS)
+         {
+            vkflash_diag.fence_reset_failures++;
+            LOGE("[VKFLASH] fence_reset_error frame=%llu epoch=%u count=%d result=%d\n",
+                  (unsigned long long)vkflash_diag.frame,
+                  vkflash_diag.context_epoch,
+                  FenceVec_size(&self->recycle_fences),
+                  (int)result);
+         }
          for (_i = 0; _i < FenceVec_size(&self->recycle_fences); _i++)
          {
             VkFence *fence = FenceVec_at(&self->recycle_fences, _i);
@@ -19549,6 +19791,16 @@ static void vk_context_reset(void)
       return;
    }
 
+   vkflash_diag.context_epoch++;
+   vkflash_diag.last_scanout = VK_NULL_HANDLE;
+   LOGI("[VKFLASH] context_reset_begin frame=%llu epoch=%u old_device=%u "
+        "old_renderer=%u retained_slots=%d\n",
+         (unsigned long long)vkflash_diag.frame,
+         vkflash_diag.context_epoch,
+         device != NULL,
+         renderer != NULL,
+         scanout_handles.count);
+
    /* A context_reset may arrive while a device/renderer from a previous reset
     * are still live (some frontends fire context_reset on surface/window
     * recreation without an intervening context_destroy). Re-allocating over the
@@ -19589,6 +19841,24 @@ static void vk_context_reset(void)
       return;
    }
 
+   LOGI("[VKFLASH] context_reset_ready frame=%llu epoch=%u scale=%u msaa=%u "
+        "frontend_queue=%llx frontend_family=%u graphics_queue=%llx "
+        "graphics_family=%u compute_queue=%llx compute_family=%u "
+        "transfer_queue=%llx transfer_family=%u frontend_is_graphics=%u\n",
+         (unsigned long long)vkflash_diag.frame,
+         vkflash_diag.context_epoch,
+         (unsigned)scaling,
+         (unsigned)msaa,
+         (unsigned long long)(uintptr_t)vulkan->queue,
+         vulkan->queue_index,
+         (unsigned long long)(uintptr_t)device->graphics_queue,
+         device->graphics_queue_family_index,
+         (unsigned long long)(uintptr_t)device->compute_queue,
+         device->compute_queue_family_index,
+         (unsigned long long)(uintptr_t)device->transfer_queue,
+         device->transfer_queue_family_index,
+         vulkan->queue == device->graphics_queue);
+
    tt_log_startup("vk renderer init: scaling=%u msaa=%u has_software_fb=%d\n",
          (unsigned)scaling, (unsigned)msaa, (int)has_software_fb);
 
@@ -19606,6 +19876,12 @@ static void vk_context_destroy(void)
 {
    if (device == NULL)
       return;
+
+   LOGI("[VKFLASH] context_destroy frame=%llu epoch=%u inside_frame=%u slots=%d\n",
+         (unsigned long long)vkflash_diag.frame,
+         vkflash_diag.context_epoch,
+         inside_frame,
+         scanout_handles.count);
 
    /* If the context is torn down mid-frame (e.g. a scale-factor change runs
     * check_variables -> SET_SYSTEM_AV_INFO between prepare_frame and
@@ -20112,8 +20388,15 @@ static void ensure_sync_index_resources(void)
       if (mask & (1u << i))
          num_frames = i + 1; }
 
+   vkflash_diag.sync_index_mask = mask;
    if (num_frames != swapchainimagevec_size(&swapchain_images))
    {
+      LOGI("[VKFLASH] sync_resize frame=%llu epoch=%u mask=%08x old_slots=%d new_slots=%u\n",
+            (unsigned long long)vkflash_diag.frame,
+            vkflash_diag.context_epoch,
+            mask,
+            swapchainimagevec_size(&swapchain_images),
+            num_frames);
       swapchainimagevec_resize(&swapchain_images, num_frames);
       scanouthandlevec_resize(&scanout_handles, num_frames);
    }
@@ -20142,6 +20425,7 @@ void rhi_vulkan_apply_pending_geometry(void)
 
 void rhi_vulkan_prepare_frame(void)
 {
+   retro_time_t wait_start;
    if (device == NULL)
    {
       /* The HW context is down (between context_destroy and the next
@@ -20158,9 +20442,13 @@ void rhi_vulkan_prepare_frame(void)
       return;
    }
 
+   vkflash_begin_frame();
    inside_frame = true;
    device_flush_frame_nolock(device);
+   vkflash_diag.prepare_sync_index = vulkan->get_sync_index(vulkan->handle);
+   wait_start = cpu_features_get_time_usec();
    vulkan->wait_sync_index(vulkan->handle);
+   vkflash_diag.frontend_wait_us = vkflash_elapsed_us(wait_start);
    ensure_sync_index_resources();
    device_next_frame_context(device);
 
@@ -20211,6 +20499,11 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
 
       /* printf("No PSX GPU display update; duping frame\n"); */
       renderer_flush(renderer);
+      vkflash_log_frame("dupe", vkflash_diag.prepare_sync_index,
+            swapchainimagevec_size(&swapchain_images),
+            device->frame_context_index, VK_NULL_HANDLE, VK_NULL_HANDLE,
+            VK_NULL_HANDLE, VK_FORMAT_UNDEFINED, prev_frame_width,
+            prev_frame_height);
       video_refresh_cb(NULL, prev_frame_width, prev_frame_height, 0);
 
       inside_frame = false;
@@ -20281,11 +20574,22 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
       /* scanout is a borrowed handle (renderer_scanout_to_texture returns
        * self->last_scanout without adding a reference), so it must not be
        * released here -- match the normal path, which never resets it. */
+      vkflash_log_frame("sync_oob", index,
+            swapchainimagevec_size(&swapchain_images),
+            device->frame_context_index,
+            image_get_image(ih_get(&scanout)), VK_NULL_HANDLE,
+            imageview_get_view(image_get_view(ih_get(&scanout))),
+            image_get_format(ih_get(&scanout)),
+            image_get_width(ih_get(&scanout), 0),
+            image_get_height(ih_get(&scanout), 0));
       inside_frame = false;
       return;
    }
 
    { struct retro_vulkan_image *image                          = &swapchain_images.items[index];
+   VkImage old_slot_image = ih_is_valid(&scanout_handles.items[index])
+         ? image_get_image(ih_get(&scanout_handles.items[index]))
+         : VK_NULL_HANDLE;
 
    image->create_info.sType                           = 
       VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -20309,6 +20613,14 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
    vulkan->set_image(vulkan->handle, image, 0,
          NULL, VK_QUEUE_FAMILY_IGNORED);
    renderer_flush(renderer);
+
+   vkflash_log_frame("present", index,
+         swapchainimagevec_size(&swapchain_images),
+         device->frame_context_index,
+         image->create_info.image, old_slot_image, image->image_view,
+         image->create_info.format,
+         image_get_width(ih_get(&scanout), 0),
+         image_get_height(ih_get(&scanout), 0));
 
    /* VKHOST_CORE_DUMP: readback through the core's own machinery. */
    if (getenv("VKHOST_CORE_DUMP"))
