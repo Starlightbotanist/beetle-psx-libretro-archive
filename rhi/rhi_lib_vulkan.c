@@ -10300,17 +10300,6 @@ static void renderer_render_semi_transparent_primitives(Renderer *self){
          unsigned to_draw = i - last_draw_offset;
          commandbuffer_set_specialization_constant_mask(cbh_get(&self->cmd), -1);
 
-         {
-            VkMemoryBarrier barrier = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
-            barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-            barrier.dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
-            vkCmdPipelineBarrier(commandbuffer_get_command_buffer(cbh_get(&self->cmd)),
-               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-               VK_DEPENDENCY_BY_REGION_BIT,
-               1, &barrier, 0, NULL, 0, NULL);
-         }
-
          commandbuffer_draw(cbh_get(&self->cmd), to_draw * 3, 1, last_draw_offset * 3, 0);
          if (self->msaa > 1)
             commandbuffer_set_multisample_state(cbh_get(&self->cmd), false, false, false);
