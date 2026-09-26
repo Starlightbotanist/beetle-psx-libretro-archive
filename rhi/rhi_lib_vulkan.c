@@ -9322,6 +9322,68 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
          param = (int16_t)((uint16_t)param | 0x4000u);
    }
 
+   /* Diagnostic only: compare the actual SDR/HDR route for textured feedback
+    * and sprites without changing draw parameters or shader behavior. */
+   {
+      static unsigned diagnostic_draws;
+      if (log_cb && diagnostic_draws < 16384 && count > 0 &&
+          hd_texture_vram.height > 0 &&
+          (self->render_state.texture_color_modulate ||
+           self->render_state.primitive_type == PrimitiveType_Sprite))
+      {
+         bool texture_feedback = vram_prov_any(self,
+               (int)hd_texture_vram.x, (int)hd_texture_vram.y,
+               (int)hd_texture_vram.width + 1, (int)hd_texture_vram.height);
+         bool palette_feedback = false;
+
+         if (self->render_state.texture_mode != TextureMode_ABGR1555)
+         {
+            unsigned palette_width = self->render_state.texture_mode ==
+                  TextureMode_Palette8bpp ? 256u : 16u;
+            palette_feedback = vram_prov_any(self,
+                  (int)self->render_state.palette_offset_x,
+                  (int)self->render_state.palette_offset_y,
+                  (int)palette_width, 1);
+         }
+         if (texture_feedback || palette_feedback ||
+             self->render_state.primitive_type == PrimitiveType_Sprite)
+         {
+            float min_color = 1.0f;
+            float max_color = 0.0f;
+            unsigned i, channel;
+
+            for (i = 0; i < count; i++)
+               for (channel = 0; channel < 3; channel++)
+               {
+                  min_color = min_(min_color, vertices[i].cf[channel]);
+                  max_color = max_(max_color, vertices[i].cf[channel]);
+               }
+            log_cb(RETRO_LOG_INFO,
+                  "[HDR Harry route] #%u precise=%u native=%u primitive=%u mode=%u modulate=%u neutral=%u tex_fb=%u pal_fb=%u scaled=%u semi=%u mask=%u dither=%u param=%04x vertices=%u color0=%.3f,%.3f,%.3f range=%.3f..%.3f draw=%u,%u,%u,%u tex=%u,%u,%u,%u pal=%u,%u\n",
+                  diagnostic_draws++, (unsigned)psx_pgxp_color,
+                  (unsigned)self->render_state.native_color,
+                  (unsigned)self->render_state.primitive_type,
+                  (unsigned)self->render_state.texture_mode,
+                  (unsigned)self->render_state.texture_color_modulate,
+                  (unsigned)vertices_have_neutral_modulation(vertices, count),
+                  (unsigned)texture_feedback, (unsigned)palette_feedback,
+                  (unsigned)scaled_read,
+                  (unsigned)self->render_state.semi_transparent,
+                  (unsigned)self->render_state.mask_test,
+                  (unsigned)self->render_state.primitive_dither,
+                  (unsigned)(uint16_t)param, count,
+                  vertices[0].cf[0], vertices[0].cf[1], vertices[0].cf[2],
+                  min_color, max_color,
+                  (unsigned)rect.x, (unsigned)rect.y,
+                  (unsigned)rect.width, (unsigned)rect.height,
+                  (unsigned)hd_texture_vram.x, (unsigned)hd_texture_vram.y,
+                  (unsigned)hd_texture_vram.width, (unsigned)hd_texture_vram.height,
+                  (unsigned)self->render_state.palette_offset_x,
+                  (unsigned)self->render_state.palette_offset_y);
+         }
+      }
+   }
+
    { unsigned i; for (i = 0; i < count; i++) {
       output[i].x = x[i];
       output[i].y = y[i];
