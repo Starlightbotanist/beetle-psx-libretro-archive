@@ -501,6 +501,7 @@ retro_log_printf_t libretro_log;
  * state, savestates, reset restoration, hazards, or command ordering. */
 #define VK_COPY_DIAG_HISTORY 180
 #define VK_COPY_DIAG_EVENTS 8
+#define VK_STATIC_FLASH_FEEDBACK_PASS_LIMIT 64
 #define VK_COPY_PATH_EQUAL 0
 #define VK_COPY_PATH_EMPTY 1
 #define VK_COPY_PATH_CACHED 2
@@ -529,6 +530,7 @@ struct VulkanCopyFrameDiagnostic
    unsigned epoch;
    bool active;
    unsigned pixel_barriers;
+   unsigned feedback_splits;
    unsigned copy_count;
    unsigned copy_dropped;
    struct VulkanCopyDiagnosticEvent events[VK_COPY_DIAG_EVENTS];
@@ -5759,6 +5761,7 @@ struct OpaqueQueue
    ClearCandidateVec clear_candidates;
    VkRect2D default_scissor;
    bool scissor_invariant;
+   unsigned feedback_primitives;
 };
 
 static void opaque_queue_init(struct OpaqueQueue *q)
@@ -5787,6 +5790,7 @@ static void opaque_queue_init(struct OpaqueQueue *q)
    q->default_scissor.offset.x = 0; q->default_scissor.offset.y = 0;
    q->default_scissor.extent.width = 0; q->default_scissor.extent.height = 0;
    q->scissor_invariant = false;
+   q->feedback_primitives = 0;
 }
 
    /* Owning uint32_t buffer (the VRAM snapshot in a SaveState). A plain struct
@@ -6114,6 +6118,11 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static void renderer_render_semi_transparent_primitives(Renderer *self);
    static void renderer_semi_transparent_set_state(Renderer *self,
          const SemiTransparentState *state);
+   static bool renderer_state_needs_feedback(const Renderer *self,
+         SemiTransparentMode semi_transparent, bool masked,
+         bool native_color);
+   static void renderer_maybe_split_feedback_pass(Renderer *self,
+         unsigned feedback_primitives);
    /* End the current render pass and transition the reusable scanout image from
       colour-attachment to shader-read-only, then record it as the last scanout.
       Shared tail of the scanout-to-texture paths. */
@@ -9573,8 +9582,15 @@ static void renderer_draw_triangle(Renderer *self, const Vertex *vertices)
 {
    HdTextureHandle hd_texture_index;
    BufferVertex vert[3];
+   unsigned feedback_primitives;
    if (!self->render_state.draw_rect.width || !self->render_state.draw_rect.height)
       return;
+
+   feedback_primitives = renderer_state_needs_feedback(self,
+         self->render_state.semi_transparent,
+         self->render_state.mask_test,
+         self->render_state.native_color) ? 1u : 0u;
+   renderer_maybe_split_feedback_pass(self, feedback_primitives);
 
    ih_reset(&self->last_scanout);
 
@@ -9615,6 +9631,7 @@ static void renderer_draw_triangle(Renderer *self, const Vertex *vertices)
                                      offset_uv };
          SemiTransparentStateVec_push(&self->queue.semi_transparent_state, &_sts);
       }
+      self->queue.feedback_primitives += feedback_primitives;
 
       /* We've hit the dragon path, we'll need programmable blending for this
        * render pass. self->render_pass_is_feedback enables self dependency in
@@ -9629,8 +9646,15 @@ static void renderer_draw_quad(Renderer *self, const Vertex *vertices)
 {
    HdTextureHandle hd_texture_index;
    BufferVertex vert[4];
+   unsigned feedback_primitives;
    if (!self->render_state.draw_rect.width || !self->render_state.draw_rect.height)
       return;
+
+   feedback_primitives = renderer_state_needs_feedback(self,
+         self->render_state.semi_transparent,
+         self->render_state.mask_test,
+         self->render_state.native_color) ? 2u : 0u;
+   renderer_maybe_split_feedback_pass(self, feedback_primitives);
 
    ih_reset(&self->last_scanout);
 
@@ -9682,6 +9706,7 @@ static void renderer_draw_quad(Renderer *self, const Vertex *vertices)
       BufferVertexVec_push(&self->queue.semi_transparent, &vert[1]);
       SemiTransparentStateVec_push(&self->queue.semi_transparent_state, &state);
       SemiTransparentStateVec_push(&self->queue.semi_transparent_state, &state);
+      self->queue.feedback_primitives += feedback_primitives;
 
       /* We've hit the dragon path, we'll need programmable blending for this render pass. */
       self->render_pass_is_feedback = true;
@@ -10162,6 +10187,39 @@ static void renderer_hd_texture_uniforms(Renderer *self,
    hd.texture = NULL;
 }
 
+static bool renderer_state_needs_feedback(const Renderer *self,
+      SemiTransparentMode semi_transparent, bool masked, bool native_color)
+{
+   if (semi_transparent == SemiTransparentMode_None)
+      return false;
+   /* RGBA8 fixed-function blending cannot perform the PS1's required RGB5
+    * source preparation and post-blend truncation for every blend mode. Keep
+    * native-colour draws in the ordered feedback path so the stored value is
+    * authoritative before any later texture read or VRAM copy. */
+   if (native_color || masked)
+      return true;
+   return psx_hdr_multipass &&
+      semi_transparent == SemiTransparentMode_Sub &&
+      self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT;
+}
+
+/* Diagnostic: preserve ordering but end a long attachment-feedback sequence
+ * before queuing the primitive that would exceed the test limit. Flushing here,
+ * before renderer_build_attribs, also keeps HD-texture handles within their
+ * existing queue lifetime. */
+static void renderer_maybe_split_feedback_pass(Renderer *self,
+      unsigned feedback_primitives)
+{
+   if (!feedback_primitives ||
+       self->queue.feedback_primitives + feedback_primitives <=
+          VK_STATIC_FLASH_FEEDBACK_PASS_LIMIT)
+      return;
+
+   fbatlas_flush_render_pass(&self->atlas);
+   if (vk_copy_diag.active)
+      vk_copy_diag.feedback_splits++;
+}
+
 /* True when a semi-transparent prim must go through the programmable-blend
  * feedback program (input attachment + per-primitive by-region barrier)
  * rather than fixed-function blending. Masked prims always do. Non-masked
@@ -10173,19 +10231,8 @@ static void renderer_hd_texture_uniforms(Renderer *self,
 static bool renderer_semi_trans_needs_feedback(const Renderer *self,
       const SemiTransparentState *state)
 {
-   if (state->semi_transparent == SemiTransparentMode_None)
-      return false;
-   /* RGBA8 fixed-function blending cannot perform the PS1's required RGB5
-    * source preparation and post-blend truncation for every blend mode. Keep
-    * native-colour draws in the existing ordered feedback path so the stored
-    * value is authoritative before any later texture read or VRAM copy. */
-   if (state->native_color)
-      return true;
-   if (state->masked)
-      return true;
-   return psx_hdr_multipass &&
-      state->semi_transparent == SemiTransparentMode_Sub &&
-      self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT;
+   return renderer_state_needs_feedback(self, state->semi_transparent,
+         state->masked, state->native_color);
 }
 
 /* With multipass off, the same prims stay on fixed-function
@@ -10890,6 +10937,7 @@ static void renderer_reset_queue(Renderer *self)
    Rect2DVec_clear(&self->queue.scaled_texture_reads);
    self->primitive_index = 0;
    self->render_pass_is_feedback = false;
+   self->queue.feedback_primitives = 0;
 
    renderer_reset_scissor_queue(self);
 
@@ -20555,9 +20603,9 @@ static void vk_copy_diag_log(
    unsigned i;
    unsigned stored = min_(diag->copy_count, VK_COPY_DIAG_EVENTS);
 
-   LOGI("[VKCOPY] f=%llu e=%u copies=%u dropped=%u barriers=%u\n",
+   LOGI("[VKCOPY] f=%llu e=%u copies=%u dropped=%u barriers=%u splits=%u\n",
          (unsigned long long)diag->frame, diag->epoch, diag->copy_count,
-         diag->copy_dropped, diag->pixel_barriers);
+         diag->copy_dropped, diag->pixel_barriers, diag->feedback_splits);
    for (i = 0; i < stored; i++)
    {
       const struct VulkanCopyDiagnosticEvent *event = &diag->events[i];
