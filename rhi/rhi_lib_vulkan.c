@@ -538,6 +538,7 @@ struct VulkanCopyFrameDiagnostic
    unsigned feedback_scaled_read;
    unsigned feedback_textured;
    unsigned feedback_filtered;
+   unsigned feedback_fixed_add;
    unsigned copy_count;
    unsigned copy_dropped;
    struct VulkanCopyDiagnosticEvent events[VK_COPY_DIAG_EVENTS];
@@ -11015,20 +11016,48 @@ static void renderer_semi_transparent_set_state(Renderer *self,
    {
       if (state->masked)
       {
-         commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendAdd);
-         commandbuffer_set_program(cbh_get(&self->cmd), textured_masked);
-         vk_copy_diag_feedback_state(state);
-         commandbuffer_pixel_barrier(cbh_get(&self->cmd));
-         commandbuffer_set_input_attachments(cbh_get(&self->cmd), 0, 3);
-         commandbuffer_set_blend_enable(cbh_get(&self->cmd), false);
-         if (self->msaa > 1)
+         /* Diagnostic: the Silent Hill flash route consists exclusively of
+          * flat, native-colour additive draws with check-mask enabled. Route
+          * only that exact class around subpassLoad while preserving the
+          * destination-mask gate through ONE_MINUS_DST_ALPHA. This retains
+          * source/geometry/order evidence and leaves every other feedback
+          * class unchanged. It is not a production replacement: RGBA8 fixed
+          * blending does not perform the feedback shader's exact post-blend
+          * RGB5 requantization. */
+         if (state->native_color && !state->textured)
          {
-            /* Need to blend per-sample. */
-            commandbuffer_set_multisample_state(cbh_get(&self->cmd), false, false, true);
+            commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_TransMode, TransMode_SemiTrans);
+            commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendAdd);
+            commandbuffer_set_program(cbh_get(&self->cmd), textured);
+            commandbuffer_set_blend_enable(cbh_get(&self->cmd), true);
+            commandbuffer_set_blend_op(cbh_get(&self->cmd), VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
+            /* Arguments are source color, source alpha, destination color,
+             * destination alpha. Gate both source channels with the mask bit,
+             * while preserving the destination exactly when the gate closes. */
+            commandbuffer_set_blend_factors(cbh_get(&self->cmd),
+                  VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA,
+                  VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE);
+            vk_copy_diag_feedback_state(state);
+            if (vk_copy_diag.active)
+               vk_copy_diag.feedback_fixed_add++;
          }
-         commandbuffer_set_blend_op(cbh_get(&self->cmd), VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
-         commandbuffer_set_blend_factors(cbh_get(&self->cmd), VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
-                                VK_BLEND_FACTOR_ONE);
+         else
+         {
+            commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendAdd);
+            commandbuffer_set_program(cbh_get(&self->cmd), textured_masked);
+            vk_copy_diag_feedback_state(state);
+            commandbuffer_pixel_barrier(cbh_get(&self->cmd));
+            commandbuffer_set_input_attachments(cbh_get(&self->cmd), 0, 3);
+            commandbuffer_set_blend_enable(cbh_get(&self->cmd), false);
+            if (self->msaa > 1)
+            {
+               /* Need to blend per-sample. */
+               commandbuffer_set_multisample_state(cbh_get(&self->cmd), false, false, true);
+            }
+            commandbuffer_set_blend_op(cbh_get(&self->cmd), VK_BLEND_OP_ADD, VK_BLEND_OP_ADD);
+            commandbuffer_set_blend_factors(cbh_get(&self->cmd), VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_ONE,
+                                   VK_BLEND_FACTOR_ONE);
+         }
       }
       else
       {
@@ -20618,14 +20647,14 @@ static void vk_copy_diag_log(
    unsigned stored = min_(diag->copy_count, VK_COPY_DIAG_EVENTS);
 
    LOGI("[VKCOPY] f=%llu e=%u copies=%u dropped=%u barriers=%u "
-         "modes=%u/%u/%u/%u flags=%u/%u/%u/%u/%u\n",
+         "modes=%u/%u/%u/%u flags=%u/%u/%u/%u/%u fixed=%u\n",
          (unsigned long long)diag->frame, diag->epoch, diag->copy_count,
          diag->copy_dropped, diag->pixel_barriers,
          diag->feedback_add, diag->feedback_average,
          diag->feedback_subtract, diag->feedback_add_quarter,
          diag->feedback_masked, diag->feedback_native_color,
          diag->feedback_scaled_read, diag->feedback_textured,
-         diag->feedback_filtered);
+         diag->feedback_filtered, diag->feedback_fixed_add);
    for (i = 0; i < stored; i++)
    {
       const struct VulkanCopyDiagnosticEvent *event = &diag->events[i];
