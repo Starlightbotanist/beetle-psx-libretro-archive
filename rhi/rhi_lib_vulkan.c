@@ -529,6 +529,15 @@ struct VulkanCopyFrameDiagnostic
    unsigned epoch;
    bool active;
    unsigned pixel_barriers;
+   unsigned feedback_add;
+   unsigned feedback_average;
+   unsigned feedback_subtract;
+   unsigned feedback_add_quarter;
+   unsigned feedback_masked;
+   unsigned feedback_native_color;
+   unsigned feedback_scaled_read;
+   unsigned feedback_textured;
+   unsigned feedback_filtered;
    unsigned copy_count;
    unsigned copy_dropped;
    struct VulkanCopyDiagnosticEvent events[VK_COPY_DIAG_EVENTS];
@@ -10909,6 +10918,44 @@ static void renderer_reset_queue(Renderer *self)
    }
 }
 
+/* Observation-only classification of the state that actually issues an input-
+ * attachment pixel barrier. Keep this beside the draw-state consumer rather
+ * than deriving it later from global renderer settings. */
+static void vk_copy_diag_feedback_state(const SemiTransparentState *state)
+{
+   if (!vk_copy_diag.active)
+      return;
+
+   switch (state->semi_transparent)
+   {
+   case SemiTransparentMode_Add:
+      vk_copy_diag.feedback_add++;
+      break;
+   case SemiTransparentMode_Average:
+      vk_copy_diag.feedback_average++;
+      break;
+   case SemiTransparentMode_Sub:
+      vk_copy_diag.feedback_subtract++;
+      break;
+   case SemiTransparentMode_AddQuarter:
+      vk_copy_diag.feedback_add_quarter++;
+      break;
+   default:
+      break;
+   }
+
+   if (state->masked)
+      vk_copy_diag.feedback_masked++;
+   if (state->native_color)
+      vk_copy_diag.feedback_native_color++;
+   if (state->scaled_read)
+      vk_copy_diag.feedback_scaled_read++;
+   if (state->textured)
+      vk_copy_diag.feedback_textured++;
+   if (state->filtering)
+      vk_copy_diag.feedback_filtered++;
+}
+
 static void renderer_semi_transparent_set_state(Renderer *self,
       const SemiTransparentState *state){
    if (state->scaled_read)
@@ -10970,6 +11017,7 @@ static void renderer_semi_transparent_set_state(Renderer *self,
       {
          commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendAdd);
          commandbuffer_set_program(cbh_get(&self->cmd), textured_masked);
+         vk_copy_diag_feedback_state(state);
          commandbuffer_pixel_barrier(cbh_get(&self->cmd));
          commandbuffer_set_input_attachments(cbh_get(&self->cmd), 0, 3);
          commandbuffer_set_blend_enable(cbh_get(&self->cmd), false);
@@ -11001,6 +11049,7 @@ static void renderer_semi_transparent_set_state(Renderer *self,
          commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendAvg);
          commandbuffer_set_program(cbh_get(&self->cmd), textured_masked);
          commandbuffer_set_input_attachments(cbh_get(&self->cmd), 0, 3);
+         vk_copy_diag_feedback_state(state);
          commandbuffer_pixel_barrier(cbh_get(&self->cmd));
          commandbuffer_set_blend_enable(cbh_get(&self->cmd), false);
          if (self->msaa > 1)
@@ -11038,6 +11087,7 @@ static void renderer_semi_transparent_set_state(Renderer *self,
          commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendSub);
          commandbuffer_set_program(cbh_get(&self->cmd), textured_masked);
          commandbuffer_set_input_attachments(cbh_get(&self->cmd), 0, 3);
+         vk_copy_diag_feedback_state(state);
          commandbuffer_pixel_barrier(cbh_get(&self->cmd));
          commandbuffer_set_blend_enable(cbh_get(&self->cmd), false);
          if (self->msaa > 1)
@@ -11068,6 +11118,7 @@ static void renderer_semi_transparent_set_state(Renderer *self,
          commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendAddQuarter);
          commandbuffer_set_program(cbh_get(&self->cmd), textured_masked);
          commandbuffer_set_input_attachments(cbh_get(&self->cmd), 0, 3);
+         vk_copy_diag_feedback_state(state);
          commandbuffer_pixel_barrier(cbh_get(&self->cmd));
          commandbuffer_set_blend_enable(cbh_get(&self->cmd), false);
          if (self->msaa > 1)
@@ -20566,9 +20617,15 @@ static void vk_copy_diag_log(
    unsigned i;
    unsigned stored = min_(diag->copy_count, VK_COPY_DIAG_EVENTS);
 
-   LOGI("[VKCOPY] f=%llu e=%u copies=%u dropped=%u barriers=%u\n",
+   LOGI("[VKCOPY] f=%llu e=%u copies=%u dropped=%u barriers=%u "
+         "modes=%u/%u/%u/%u flags=%u/%u/%u/%u/%u\n",
          (unsigned long long)diag->frame, diag->epoch, diag->copy_count,
-         diag->copy_dropped, diag->pixel_barriers);
+         diag->copy_dropped, diag->pixel_barriers,
+         diag->feedback_add, diag->feedback_average,
+         diag->feedback_subtract, diag->feedback_add_quarter,
+         diag->feedback_masked, diag->feedback_native_color,
+         diag->feedback_scaled_read, diag->feedback_textured,
+         diag->feedback_filtered);
    for (i = 0; i < stored; i++)
    {
       const struct VulkanCopyDiagnosticEvent *event = &diag->events[i];
