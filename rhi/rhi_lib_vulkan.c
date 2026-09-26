@@ -10203,8 +10203,12 @@ static bool renderer_state_needs_feedback(const Renderer *self,
       self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT;
 }
 
-/* Diagnostic: preserve ordering but end a long attachment-feedback sequence
- * before queuing the primitive that would exceed the test limit. Flushing here,
+/* Diagnostic: preserve ordering but submit a long attachment-feedback sequence
+ * before queuing the primitive that would exceed the test limit. Only count an
+ * actual atlas pass; fbatlas_flush_render_pass is otherwise a no-op. The queue
+ * submission deliberately forces attachment contents out of the current
+ * command buffer so this test can distinguish an Adreno visibility failure
+ * from corruption caused by the render-pass boundary itself. Flushing here,
  * before renderer_build_attribs, also keeps HD-texture handles within their
  * existing queue lifetime. */
 static void renderer_maybe_split_feedback_pass(Renderer *self,
@@ -10214,8 +10218,11 @@ static void renderer_maybe_split_feedback_pass(Renderer *self,
        self->queue.feedback_primitives + feedback_primitives <=
           VK_STATIC_FLASH_FEEDBACK_PASS_LIMIT)
       return;
+   if (!self->atlas.renderpass.inside)
+      return;
 
    fbatlas_flush_render_pass(&self->atlas);
+   renderer_flush(self);
    if (vk_copy_diag.active)
       vk_copy_diag.feedback_splits++;
 }
