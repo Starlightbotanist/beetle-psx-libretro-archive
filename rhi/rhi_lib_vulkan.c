@@ -62,6 +62,7 @@ extern int   psx_video_cable;    /* 0 = off, 1 = S-Video, 2 = composite, 3 = RF,
 extern float psx_phase_error;    /* decoder carrier misalignment, cycles */
 extern int   psx_black_setup;    /* NTSC pedestal mismatch: 0 none, 1 lifted, 2 crushed */
 extern retro_log_printf_t log_cb;
+extern retro_input_state_t dbg_input_state_cb;
 extern int   psx_hdr_overbright_hot;   /* additive/sub source: 0 clamped, 1 hot */
 extern int   psx_pgxp_color;           /* PGXP precise colour: vertex colour may exceed 1.0 on fp16 */
 extern int   psx_pgxp_fog;             /* PGXP linear-light depth cue; effective only with precise colour */
@@ -494,6 +495,53 @@ retro_log_printf_t libretro_log;
 
 #define LOGE(...) do { if (libretro_log) libretro_log(RETRO_LOG_ERROR, __VA_ARGS__); } while(0)
 #define LOGI(...) do { if (libretro_log) libretro_log(RETRO_LOG_INFO, __VA_ARGS__); } while(0)
+
+/* Focused, observation-only tracing for Silent Hill's intermittent static.
+ * Keep this outside Renderer/FBAtlas so it cannot affect authoritative GPU
+ * state, savestates, reset restoration, hazards, or command ordering. */
+#define VK_COPY_DIAG_HISTORY 180
+#define VK_COPY_DIAG_EVENTS 8
+#define VK_COPY_PATH_EQUAL 0
+#define VK_COPY_PATH_EMPTY 1
+#define VK_COPY_PATH_CACHED 2
+#define VK_COPY_PATH_QUEUED 3
+#define VK_COPY_DOMAIN_NONE 2
+
+struct VulkanCopyDiagnosticEvent
+{
+   unsigned src_x;
+   unsigned src_y;
+   unsigned dst_x;
+   unsigned dst_y;
+   unsigned width;
+   unsigned height;
+   unsigned path;
+   unsigned domain;
+   unsigned mask_test;
+   unsigned set_mask;
+   unsigned scaling;
+   unsigned msaa;
+};
+
+struct VulkanCopyFrameDiagnostic
+{
+   uint64_t frame;
+   unsigned epoch;
+   bool active;
+   unsigned pixel_barriers;
+   unsigned copy_count;
+   unsigned copy_dropped;
+   struct VulkanCopyDiagnosticEvent events[VK_COPY_DIAG_EVENTS];
+};
+
+static struct VulkanCopyFrameDiagnostic vk_copy_diag;
+static struct VulkanCopyFrameDiagnostic
+      vk_copy_diag_history[VK_COPY_DIAG_HISTORY];
+static unsigned vk_copy_diag_history_head;
+static unsigned vk_copy_diag_history_count;
+static uint64_t vk_copy_diag_frame;
+static unsigned vk_copy_diag_epoch;
+static bool vk_copy_diag_marker_down;
 
 #ifdef _MSC_VER
 #endif
@@ -10327,10 +10375,42 @@ static void renderer_flush_blit(Renderer *self,
    } }
 }
 
+static void vk_copy_diag_record(Renderer *self, const TTRect *dst,
+      const TTRect *src, unsigned path, unsigned domain)
+{
+   unsigned index;
+   struct VulkanCopyDiagnosticEvent *event;
+
+   if (!vk_copy_diag.active)
+      return;
+
+   index = vk_copy_diag.copy_count++;
+   if (index >= VK_COPY_DIAG_EVENTS)
+   {
+      vk_copy_diag.copy_dropped++;
+      return;
+   }
+
+   event = &vk_copy_diag.events[index];
+   event->src_x = src->x;
+   event->src_y = src->y;
+   event->dst_x = dst->x;
+   event->dst_y = dst->y;
+   event->width = dst->width;
+   event->height = dst->height;
+   event->path = path;
+   event->domain = domain;
+   event->mask_test = self->render_state.mask_test ? 1u : 0u;
+   event->set_mask = self->render_state.force_mask_bit ? 1u : 0u;
+   event->scaling = self->scaling;
+   event->msaa = self->msaa;
+}
+
 static void renderer_blit_vram(Renderer *self,
       const TTRect *dst,
       const TTRect *src){
    Domain domain;
+   bool intersects;
    VK_ASSERT(dst->width == src->width);
    VK_ASSERT(dst->height == src->height);
    /* Conservative provenance: the destination may now hold GPU-rendered
@@ -10340,10 +10420,18 @@ static void renderer_blit_vram(Renderer *self,
 
    /* Happens a lot in Square games for some reason. */
    if (rect_eq(dst, src))
+   {
+      vk_copy_diag_record(self, dst, src, VK_COPY_PATH_EQUAL,
+            VK_COPY_DOMAIN_NONE);
       return;
+   }
 
    if (dst->width == 0 || dst->height == 0)
+   {
+      vk_copy_diag_record(self, dst, src, VK_COPY_PATH_EMPTY,
+            VK_COPY_DOMAIN_NONE);
       return;
+   }
 
 #ifndef NDEBUG
    TT_LOG_VERBOSE(RETRO_LOG_INFO,
@@ -10357,7 +10445,12 @@ static void renderer_blit_vram(Renderer *self,
       texture_tracker_blit(self->tracker, *dst, *src);
    }
 
-   if (rect_intersects(dst, src))
+   intersects = rect_intersects(dst, src);
+   vk_copy_diag_record(self, dst, src,
+         intersects ? VK_COPY_PATH_CACHED : VK_COPY_PATH_QUEUED,
+         (unsigned)domain);
+
+   if (intersects)
    {
       unsigned factor;
       /* The software implementation takes texture cache into account by copying
@@ -14190,6 +14283,8 @@ static VkOffset3D cb_add_offset(const VkOffset3D *a, const VkOffset3D *b)
    {
       VK_ASSERT(self->actual_render_pass);
       VK_ASSERT(self->framebuffer);
+      if (vk_copy_diag.active)
+         vk_copy_diag.pixel_barriers++;
       { VkMemoryBarrier barrier = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
       barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
       barrier.dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT;
@@ -19830,6 +19925,12 @@ static void vk_defer_dispatch(void *user, const rhi_defer_op_t *op)
 
 static void vk_context_reset(void)
 {
+   vk_copy_diag.active = false;
+   vk_copy_diag_marker_down = false;
+   vk_copy_diag_history_head = 0;
+   vk_copy_diag_history_count = 0;
+   vk_copy_diag_frame = 0;
+
    if (!environ_cb(RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE, (void**)&vulkan) || !vulkan)
       return;
 
@@ -19889,6 +19990,10 @@ static void vk_context_reset(void)
       return;
    }
 
+   vk_copy_diag_epoch++;
+   LOGI("[VKCOPY] context-reset epoch=%u paths=equal/empty/cached/queued "
+         "domains=unscaled/scaled/none\n", vk_copy_diag_epoch);
+
    tt_log_startup("vk renderer init: scaling=%u msaa=%u has_software_fb=%d\n",
          (unsigned)scaling, (unsigned)msaa, (int)has_software_fb);
 
@@ -19904,6 +20009,13 @@ static void vk_context_reset(void)
 
 static void vk_context_destroy(void)
 {
+   LOGI("[VKCOPY] context-destroy epoch=%u frame=%llu\n",
+         vk_copy_diag_epoch, (unsigned long long)vk_copy_diag_frame);
+   vk_copy_diag.active = false;
+   vk_copy_diag_marker_down = false;
+   vk_copy_diag_history_head = 0;
+   vk_copy_diag_history_count = 0;
+
    if (device == NULL)
       return;
 
@@ -20440,6 +20552,76 @@ void rhi_vulkan_apply_pending_geometry(void)
    }
 }
 
+static void vk_copy_diag_begin(void)
+{
+   memset(&vk_copy_diag, 0, sizeof(vk_copy_diag));
+   vk_copy_diag.frame = ++vk_copy_diag_frame;
+   vk_copy_diag.epoch = vk_copy_diag_epoch;
+   vk_copy_diag.active = true;
+}
+
+static void vk_copy_diag_log(
+      const struct VulkanCopyFrameDiagnostic *diag)
+{
+   unsigned i;
+   unsigned stored = min_(diag->copy_count, VK_COPY_DIAG_EVENTS);
+
+   LOGI("[VKCOPY] f=%llu e=%u copies=%u dropped=%u barriers=%u\n",
+         (unsigned long long)diag->frame, diag->epoch, diag->copy_count,
+         diag->copy_dropped, diag->pixel_barriers);
+   for (i = 0; i < stored; i++)
+   {
+      const struct VulkanCopyDiagnosticEvent *event = &diag->events[i];
+      LOGI("[VKCOPY] f=%llu i=%u src=%u,%u dst=%u,%u size=%ux%u "
+            "path=%u domain=%u mask=%u/%u cfg=%u/%u\n",
+            (unsigned long long)diag->frame, i,
+            event->src_x, event->src_y, event->dst_x, event->dst_y,
+            event->width, event->height, event->path, event->domain,
+            event->mask_test, event->set_mask, event->scaling,
+            event->msaa);
+   }
+}
+
+static void vk_copy_diag_finish(void)
+{
+   bool marker_now = false;
+   bool marker_edge;
+   unsigned i;
+   unsigned oldest;
+
+   if (!vk_copy_diag.active)
+      return;
+
+   if (dbg_input_state_cb)
+      marker_now = dbg_input_state_cb(0, RETRO_DEVICE_JOYPAD, 0,
+            RETRO_DEVICE_ID_JOYPAD_R3) != 0;
+   marker_edge = marker_now && !vk_copy_diag_marker_down;
+   vk_copy_diag_marker_down = marker_now;
+   vk_copy_diag.active = false;
+
+   vk_copy_diag_history[vk_copy_diag_history_head] = vk_copy_diag;
+   vk_copy_diag_history_head =
+         (vk_copy_diag_history_head + 1) % VK_COPY_DIAG_HISTORY;
+   if (vk_copy_diag_history_count < VK_COPY_DIAG_HISTORY)
+      vk_copy_diag_history_count++;
+
+   if (marker_edge)
+   {
+      LOGI("[VKCOPY] marker=R3 frame=%llu epoch=%u dumping=%u\n",
+            (unsigned long long)vk_copy_diag.frame, vk_copy_diag.epoch,
+            vk_copy_diag_history_count);
+      oldest = (vk_copy_diag_history_head + VK_COPY_DIAG_HISTORY -
+            vk_copy_diag_history_count) % VK_COPY_DIAG_HISTORY;
+      for (i = 0; i < vk_copy_diag_history_count; i++)
+         vk_copy_diag_log(&vk_copy_diag_history[
+               (oldest + i) % VK_COPY_DIAG_HISTORY]);
+   }
+   else if ((vk_copy_diag.frame % 600) == 0)
+      LOGI("[VKCOPY] heartbeat frame=%llu epoch=%u history=%u\n",
+            (unsigned long long)vk_copy_diag.frame, vk_copy_diag.epoch,
+            vk_copy_diag_history_count);
+}
+
 void rhi_vulkan_prepare_frame(void)
 {
    if (device == NULL)
@@ -20468,6 +20650,8 @@ void rhi_vulkan_prepare_frame(void)
     * don't dereference it. */
    if (renderer == NULL)
       return;
+
+   vk_copy_diag_begin();
 
    renderer->scaled_uv_offset = scaled_uv_offset;
    renderer->primitive_filter_mode = (FilterMode)(filter_mode);
@@ -20519,6 +20703,7 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
 
       /* printf("No PSX GPU display update; duping frame\n"); */
       renderer_flush(renderer);
+      vk_copy_diag_finish();
       video_refresh_cb(NULL, prev_frame_width, prev_frame_height, 0);
 
       inside_frame = false;
@@ -20588,6 +20773,7 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
       /* scanout is a borrowed handle (renderer_scanout_to_texture returns
        * self->last_scanout without adding a reference), so it must not be
        * released here -- match the normal path, which never resets it. */
+      vk_copy_diag_finish();
       inside_frame = false;
       return;
    }
@@ -20616,6 +20802,7 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
    vulkan->set_image(vulkan->handle, image, 0,
          NULL, VK_QUEUE_FAMILY_IGNORED);
    renderer_flush(renderer);
+   vk_copy_diag_finish();
 
    /* VKHOST_CORE_DUMP: readback through the core's own machinery. */
    if (getenv("VKHOST_CORE_DUMP"))
