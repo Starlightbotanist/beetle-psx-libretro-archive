@@ -45,9 +45,7 @@
 #include "../state_helpers.h"
 #include "../../rhi/rhi_intf.h"
 #include "../../rhi/tt_trace.h"
-#ifdef PSX_MEASURE_MODULATE
 #include "../../include/debug.h"   /* log_cb */
-#endif
 
 #include "../pgxp/pgxp_main.h"
 #include "../pgxp/pgxp_gpu.h"
@@ -115,6 +113,16 @@ static const int8_t dither_table[4][4] =
 };
 
 static FastFIFO GPU_BlitterFIFO; /* 0x10 on an actual PS1 GPU, 0x20 here (see comment at top of gpu.h) */
+
+/* Temporary rider diagnostic: keep source addresses alongside queued GP0
+ * words so an FBWrite summary identifies the RAM handed to the GPU. */
+static uint32_t rider_fifo_addr[FASTFIFO_SIZE];
+static struct
+{
+   uint32_t sequence, reports, words, zero_words, hash;
+   uint32_t first_addr, last_addr, first_word, last_word;
+   uint32_t x, y, w, h;
+} rider_upload;
 
 struct CTEntry
 {
@@ -657,6 +665,15 @@ static void Command_FBWrite(PS_GPU* g, const uint32_t *cb)
 
    if(!g->FBRW_H)
       g->FBRW_H = 0x200;
+
+   rider_upload.sequence++;
+   rider_upload.words = 0;
+   rider_upload.zero_words = 0;
+   rider_upload.hash = 2166136261U;
+   rider_upload.x = g->FBRW_X;
+   rider_upload.y = g->FBRW_Y;
+   rider_upload.w = g->FBRW_W;
+   rider_upload.h = g->FBRW_H;
 
    g->FBRW_CurX = g->FBRW_X;
    g->FBRW_CurY = g->FBRW_Y;
@@ -1264,6 +1281,7 @@ bool GPU_Rescale(uint8_t ushift)
 
 static void GPU_SoftReset(void) /* Control command 0x00 */
 {
+   rider_upload.words = 0;
    GPU.IRQPending = false;
    IRQ_Assert(IRQ_GPU, GPU.IRQPending);
 
@@ -1333,6 +1351,7 @@ static void GPU_SoftReset(void) /* Control command 0x00 */
 
 void GPU_Power(void)
 {
+   memset(&rider_upload, 0, sizeof(rider_upload));
    memset(GPU.vram, 0, 512 * 1024 * UPSCALE(&GPU) * UPSCALE(&GPU) * sizeof(*GPU.vram));
 
    memset(GPU.CLUT_Cache, 0, sizeof(GPU.CLUT_Cache));
@@ -1465,7 +1484,20 @@ static void ProcessFIFO(uint32_t in_count)
       case INCMD_NONE:
          break;
       case INCMD_FBWRITE:
-         InData = FastFIFO_Read(&GPU_BlitterFIFO);
+         {
+            uint32_t source_addr = rider_fifo_addr[GPU_BlitterFIFO.read_pos];
+            InData = FastFIFO_Read(&GPU_BlitterFIFO);
+            if(!rider_upload.words)
+            {
+               rider_upload.first_addr = source_addr;
+               rider_upload.first_word = InData;
+            }
+            rider_upload.last_addr = source_addr;
+            rider_upload.last_word = InData;
+            rider_upload.words++;
+            rider_upload.zero_words += (InData == 0);
+            rider_upload.hash = (rider_upload.hash ^ InData) * 16777619U;
+         }
 
          for(i = 0; i < 2; i++)
          {
@@ -1493,6 +1525,19 @@ static void ProcessFIFO(uint32_t in_count)
                         GPU.MaskEvalAND != 0,
                         GPU.MaskSetOR != 0);
                   GPU.InCmd = INCMD_NONE;
+                  if(rider_upload.reports < 2048 && log_cb &&
+                     ((rider_upload.w <= 256 && rider_upload.h <= 4) ||
+                      rider_upload.zero_words * 4 >= rider_upload.words * 3))
+                  {
+                     log_cb(RETRO_LOG_INFO,
+                           "[rider-diag] upload=%u rect=%u,%u %ux%u words=%u zero=%u src=%08x..%08x first=%08x last=%08x hash=%08x\n",
+                           rider_upload.sequence, rider_upload.x, rider_upload.y,
+                           rider_upload.w, rider_upload.h, rider_upload.words,
+                           rider_upload.zero_words, rider_upload.first_addr,
+                           rider_upload.last_addr, rider_upload.first_word,
+                           rider_upload.last_word, rider_upload.hash);
+                     rider_upload.reports++;
+                  }
                   break;   /* Break out of the for() loop. */
                }
             }
@@ -1580,6 +1625,7 @@ static INLINE void GPU_WriteCB(uint32_t InData, uint32_t addr)
 
    if(PGXP_enabled())
       PGXP_WriteFIFO(ReadMem(addr), GPU_BlitterFIFO.write_pos);
+   rider_fifo_addr[GPU_BlitterFIFO.write_pos] = addr;
    FastFIFO_Write(&GPU_BlitterFIFO, InData);
 
    if(GPU_BlitterFIFO.in_count && GPU.InCmd != INCMD_FBREAD)

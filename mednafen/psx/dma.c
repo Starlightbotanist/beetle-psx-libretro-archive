@@ -33,6 +33,7 @@
 #include "mdec.h"
 #include "gpu.h"
 #include "dma.h"
+#include "../../include/debug.h"
 
 /* Notes:
 
@@ -80,6 +81,7 @@ typedef struct
 
 static Channel DMACH[7];
 static int32_t lastts;
+static unsigned cdc_short_read_reports;
 
 static INLINE void RecalcIRQOut(void)
 {
@@ -100,6 +102,7 @@ void DMA_ResetTS(void)
 void DMA_Power(void)
 {
    lastts = 0;
+   cdc_short_read_reports = 0;
 
    memset(DMACH, 0, sizeof(DMACH));
 
@@ -238,6 +241,18 @@ static INLINE void ChRW(const unsigned ch, const uint32_t CRModeCache, const uin
 #endif
          if(!(CRModeCache & 0x1))
          {
+            /* Diagnostic only: a short CDC FIFO read pads the DMA word with
+             * zero bytes.  Record the destination before CDC_DMARead drains it. */
+            if(PSX_CDC && PSX_CDC->DMABuffer.in_count < 4 &&
+               cdc_short_read_reports < 128 && log_cb)
+            {
+               log_cb(RETRO_LOG_INFO,
+                     "[rider-diag] cdc-short ts=%d dst=%06x fifo=%u bcr=%08x chcr=%08x\n",
+                     lastts, DMACH[ch].CurAddr,
+                     (unsigned)PSX_CDC->DMABuffer.in_count,
+                     DMACH[ch].BlockControl, DMACH[ch].ChanControl);
+               cdc_short_read_reports++;
+            }
             extra_cyc_overhead = 8;	/* FIXME: Test. */
             *V = CDC_DMARead();		/* Note: Legend of Mana's opening movie is sensitive to DMA timing, including CDC. */
          }
