@@ -10144,30 +10144,45 @@ static void renderer_hd_texture_uniforms(Renderer *self,
    hd.texture = NULL;
 }
 
-/* True when a semi-transparent prim must go through the programmable-blend
- * feedback program (input attachment + per-primitive by-region barrier)
- * rather than fixed-function blending. Masked prims always do. Non-masked
- * subtractive prims additionally do on the 16F HDR target: fixed-function
- * REVERSE_SUBTRACT cannot floor the result at zero on a float attachment,
- * and hardware clamps B - F at 0 per channel. The feedback program applies
- * the floor in-shader (see primitive_feedback.frag) with the check-mask
- * test disabled via SpecConstIndex_MaskTest. */
+/* True when a semi-transparent prim uses the programmable-blend feedback
+ * program. Native-colour average and quarter-add need post-blend RGB5
+ * truncation; fixed-function RGBA8 blending cannot provide it. Native-colour
+ * Add sources, including raw texture samples, are quantized before blending
+ * by primitive.frag, so fixed Add preserves RGB5 sums (with 255 representing
+ * saturation). Keep the existing masked textured Add route, but leave masked
+ * flat Add on the fixed path: its input-attachment read causes full-screen
+ * flashes on the tested Adreno GPU. */
 static bool renderer_semi_trans_needs_feedback(const Renderer *self,
       const SemiTransparentState *state)
 {
    if (state->semi_transparent == SemiTransparentMode_None)
       return false;
-   /* RGBA8 fixed-function blending cannot perform the PS1's required RGB5
-    * source preparation and post-blend truncation for every blend mode. Keep
-    * native-colour draws in the existing ordered feedback path so the stored
-    * value is authoritative before any later texture read or VRAM copy. */
-   if (state->native_color)
-      return true;
-   if (state->masked)
-      return true;
-   return psx_hdr_multipass &&
-      state->semi_transparent == SemiTransparentMode_Sub &&
-      self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT;
+   switch (state->semi_transparent)
+   {
+   case SemiTransparentMode_Add:
+      return state->masked && (!state->native_color || state->textured);
+   case SemiTransparentMode_Average:
+   case SemiTransparentMode_AddQuarter:
+      return state->masked || state->native_color;
+   case SemiTransparentMode_Sub:
+      return state->masked || state->native_color ||
+         (psx_hdr_multipass &&
+          self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT);
+   default:
+      return false;
+   }
+}
+
+/* Program selection and draw ordering are separate decisions. Native-colour
+ * fixed Add still needs the historical per-primitive batch boundaries: using
+ * the feedback-program predicate alone caused object-local flashes in
+ * Jumping Flash on the tested Adreno GPU. */
+static bool renderer_semi_trans_needs_separate_draw(const Renderer *self,
+      const SemiTransparentState *state)
+{
+   return (state->native_color &&
+         state->semi_transparent != SemiTransparentMode_None) ||
+      renderer_semi_trans_needs_feedback(self, state);
 }
 
 /* With multipass off, the same prims stay on fixed-function
@@ -10298,10 +10313,9 @@ static void renderer_render_semi_transparent_primitives(Renderer *self){
    /* These pixels are blended, so we have to render them in-order.
     * Batch up as long as we can. */
    { unsigned i; for (i = 1; i < prims; i++) {
-      /* If we need programmable shading, we can't batch as primitives may
-       * overlap. We could in theory do some fancy tests here, but probably
-       * overkill here. */
-      if (renderer_semi_trans_needs_feedback(self, &last_state) ||
+      /* Preserve per-primitive boundaries for feedback reads and native-
+       * colour draws; later primitives may overlap earlier ones. */
+      if (renderer_semi_trans_needs_separate_draw(self, &last_state) ||
           !semi_transparent_state_eq(&last_state, SemiTransparentStateVec_at(&self->queue.semi_transparent_state, i)))
       {
          unsigned to_draw = i - last_draw_offset;
@@ -10932,12 +10946,11 @@ static void renderer_semi_transparent_set_state(Renderer *self,
    }
    case SemiTransparentMode_Add:
    {
-      /* A flat native-colour source is already reduced to RGB5, and its
-       * alpha carries only the set-mask bit. Fixed-function blending can
-       * therefore apply additive colour while using destination alpha to
-       * suppress the source and preserve masked destination pixels. Avoid
-       * the programmable framebuffer read for this representable case. */
-      if (state->masked && (!state->native_color || state->textured))
+      /* Native-colour Add sources are reduced to RGB5 before blending,
+       * including raw texture samples. Fixed-function addition preserves
+       * the RGB5 sum; destination alpha can suppress a masked flat source.
+       * Retain feedback for masked textured Add as before. */
+      if (renderer_semi_trans_needs_feedback(self, state))
       {
          commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendAdd);
          commandbuffer_set_program(cbh_get(&self->cmd), textured_masked);
@@ -10973,7 +10986,7 @@ static void renderer_semi_transparent_set_state(Renderer *self,
    }
    case SemiTransparentMode_Average:
    {
-      if (state->masked)
+      if (renderer_semi_trans_needs_feedback(self, state))
       {
          commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendAvg);
          commandbuffer_set_program(cbh_get(&self->cmd), textured_masked);
@@ -11040,7 +11053,7 @@ static void renderer_semi_transparent_set_state(Renderer *self,
    }
    case SemiTransparentMode_AddQuarter:
    {
-      if (state->masked)
+      if (renderer_semi_trans_needs_feedback(self, state))
       {
          commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_BlendMode, BlendMode_BlendAddQuarter);
          commandbuffer_set_program(cbh_get(&self->cmd), textured_masked);
