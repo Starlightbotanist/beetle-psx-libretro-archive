@@ -62,6 +62,7 @@ extern int   psx_video_cable;    /* 0 = off, 1 = S-Video, 2 = composite, 3 = RF,
 extern float psx_phase_error;    /* decoder carrier misalignment, cycles */
 extern int   psx_black_setup;    /* NTSC pedestal mismatch: 0 none, 1 lifted, 2 crushed */
 extern retro_log_printf_t log_cb;
+extern retro_input_state_t dbg_input_state_cb;
 extern int   psx_hdr_overbright_hot;   /* additive/sub source: 0 clamped, 1 hot */
 extern int   psx_pgxp_color;           /* PGXP precise colour: vertex colour may exceed 1.0 on fp16 */
 extern int   psx_pgxp_fog;             /* PGXP linear-light depth cue; effective only with precise colour */
@@ -5901,6 +5902,13 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
          ImageHandle scaled_framebuffer_msaa;
          ImageHandle scaled_read_snapshot;
          bool scaled_read_snapshot_failed;
+         /* Local diagnostic only: R3 captures two frames without changing
+          * VRAM, draw routing, palette lifetime or GPU synchronization. */
+         struct
+         {
+            unsigned frame, capture, frames_left, draws;
+            bool marker_down;
+         } water_diag;
          ImageHandle bias_framebuffer;
          ImageHandle framebuffer;
          ImageHandle framebuffer_ssaa;
@@ -6683,6 +6691,7 @@ static void renderer_init(Renderer *self,
    self->hdr_scanout_format = VK_FORMAT_UNDEFINED;
    self->analog_phase       = 0.0;
    self->scaled_uv_offset = false;
+   memset(&self->water_diag, 0, sizeof(self->water_diag));
    self->valid = false;
    self->primitive_filter_mode = FilterMode_NearestNeighbor;
    self->sprite_filter_exclude = FilterExcludeNone;
@@ -9107,6 +9116,69 @@ static bool vertices_have_neutral_modulation(const Vertex *vertices,
    return true;
 }
 
+struct WaterDiagSummary
+{
+   unsigned ownership[4], rendered, pending;
+   StatusFlags flags;
+};
+
+static void water_diag_summary(FBAtlas *atlas, const TTRect *rect,
+      struct WaterDiagSummary *summary)
+{
+   unsigned x, y, xend, yend;
+
+   memset(summary, 0, sizeof(*summary));
+   if (!rect->width || !rect->height)
+      return;
+   xend = (rect->x + rect->width - 1) / BLOCK_WIDTH;
+   yend = (rect->y + rect->height - 1) / BLOCK_HEIGHT;
+   for (y = rect->y / BLOCK_HEIGHT; y <= yend; y++)
+      for (x = rect->x / BLOCK_WIDTH; x <= xend; x++)
+      {
+         StatusFlags status = *fbatlas_info(atlas, x, y);
+         summary->ownership[status & STATUS_OWNERSHIP_MASK]++;
+         summary->rendered += (status & STATUS_TEXTURE_RENDERED) != 0;
+         summary->pending += fbatlas_block_test(
+               atlas->pending_fragment_write, x, y);
+         summary->flags |= status;
+      }
+}
+
+static void water_diag_log_area(Renderer *self, unsigned draw,
+      const char *kind, const TTRect *rect,
+      const struct WaterDiagSummary *summary)
+{
+   if (log_cb)
+      log_cb(RETRO_LOG_INFO,
+            "[VK_WATER_AREA] capture=%u frame=%u draw=%u kind=%s "
+            "rect=%u,%u,%u,%u own=%u,%u,%u,%u rendered=%u pending=%u flags=%04x\n",
+            self->water_diag.capture, self->water_diag.frame, draw, kind,
+            rect->x, rect->y, rect->width, rect->height,
+            summary->ownership[0], summary->ownership[1],
+            summary->ownership[2], summary->ownership[3],
+            summary->rendered, summary->pending, (unsigned)summary->flags);
+}
+
+static void water_diag_sync(FBAtlas *atlas, Domain domain,
+      const TTRect *rect, const char *kind)
+{
+   Renderer *self = atlas->listener;
+   struct WaterDiagSummary before, after;
+   bool indexed = atlas->renderpass.texture_mode == TextureMode_Palette4bpp ||
+         atlas->renderpass.texture_mode == TextureMode_Palette8bpp;
+   bool capture = indexed && self->water_diag.frames_left &&
+         self->water_diag.draws && self->water_diag.draws <= 4096u;
+
+   if (capture)
+      water_diag_summary(atlas, rect, &before);
+   fbatlas_sync_domain(atlas, domain, rect);
+   if (!capture)
+      return;
+   water_diag_summary(atlas, rect, &after);
+   water_diag_log_area(self, self->water_diag.draws, kind, rect, &before);
+   water_diag_log_area(self, self->water_diag.draws, "after-sync", rect, &after);
+}
+
 static void renderer_build_attribs(Renderer *self, BufferVertex *output, const Vertex *vertices, unsigned count, HdTextureHandle *hd_texture_index_out,
    bool *filtering_out, bool *scaled_read_out, unsigned *shift_out, bool *offset_uv_out){
       int16_t param;
@@ -9127,6 +9199,9 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
 
    { TTRect hd_texture_vram = make_rect(0, 0, 0, 0);
    TTRect sampled_vram = make_rect(0, 0, 0, 0);
+   unsigned diag_draw = 0;
+   bool diag_old_rendered = false, diag_texture_prov = false, diag_palette_prov = false;
+   struct WaterDiagSummary diag_texture, diag_palette;
 
    if (self->render_state.texture_mode != TextureMode_None)
    {
@@ -9188,6 +9263,27 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
       sampled_vram = self->atlas.renderpass.texture_window;
       sampled_vram.x += self->render_state.texture_offset_x;
       sampled_vram.y += self->render_state.texture_offset_y;
+   }
+
+   if (shift && self->water_diag.frames_left &&
+       ++self->water_diag.draws <= 4096u)
+   {
+      TTRect old_sampled = hd_texture_vram;
+      TTRect palette = { self->render_state.palette_offset_x,
+         self->render_state.palette_offset_y, shift == 1 ? 256u : 16u, 1 };
+
+      diag_draw = self->water_diag.draws;
+      if (old_sampled.height && !old_sampled.width)
+         old_sampled.width = 1;
+      diag_old_rendered = fbatlas_texture_rendered(&self->atlas, &old_sampled);
+      water_diag_summary(&self->atlas, &sampled_vram, &diag_texture);
+      water_diag_summary(&self->atlas, &palette, &diag_palette);
+      diag_texture_prov = vram_prov_any(self, sampled_vram.x, sampled_vram.y,
+            sampled_vram.width, sampled_vram.height);
+      diag_palette_prov = vram_prov_any(self, palette.x, palette.y,
+            palette.width, palette.height);
+      water_diag_log_area(self, diag_draw, "texture-before", &sampled_vram, &diag_texture);
+      water_diag_log_area(self, diag_draw, "palette-before", &palette, &diag_palette);
    }
 
    /* Compute bounding box for the draw call. */
@@ -9393,6 +9489,44 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
 
       output[i].color[3] = self->render_state.force_mask_bit ? 1.0f : 0.0f;
    } }
+   if (diag_draw && log_cb)
+   {
+      unsigned i;
+      bool texture_rendered = diag_texture.rendered || diag_texture.pending;
+      bool palette_rendered = diag_palette.rendered || diag_palette.pending;
+
+      log_cb(RETRO_LOG_INFO,
+            "[VK_WATER_DRAW] capture=%u frame=%u draw=%u shift=%u "
+            "dst=%u,%u,%u,%u uv=%u,%u,%u,%u window=%u,%u,%u,%u "
+            "scaled=%u old-route=%u full-route=%u retained=%u feedback=%u "
+            "prov=%u,%u neutral=%u param=%04x semi=%u masked=%u "
+            "filter=%u offset=%u snapshot-failed=%u vertices=%u\n",
+            self->water_diag.capture, self->water_diag.frame, diag_draw, shift,
+            rect.x, rect.y, rect.width, rect.height,
+            self->render_state.UVLimits.min_u, self->render_state.UVLimits.min_v,
+            self->render_state.UVLimits.max_u, self->render_state.UVLimits.max_v,
+            self->render_state.texture_window.mask_x, self->render_state.texture_window.mask_y,
+            self->render_state.texture_window.or_x, self->render_state.texture_window.or_y,
+            (unsigned)scaled_read, (unsigned)(!diag_old_rendered && palette_rendered),
+            (unsigned)(!texture_rendered && palette_rendered),
+            (unsigned)((uint16_t)param & 0x1000u) != 0,
+            (unsigned)((uint16_t)param & 0x0800u) != 0,
+            (unsigned)diag_texture_prov, (unsigned)diag_palette_prov,
+            (unsigned)vertices_have_neutral_modulation(vertices, count),
+            (unsigned)(uint16_t)param, (unsigned)self->render_state.semi_transparent,
+            (unsigned)self->render_state.mask_test,
+            (unsigned)self->primitive_filter_mode, (unsigned)offset_uv,
+            (unsigned)self->scaled_read_snapshot_failed, count);
+      for (i = 0; i < count; i++)
+         log_cb(RETRO_LOG_INFO,
+               "[VK_WATER_VERTEX] capture=%u frame=%u draw=%u vertex=%u "
+               "xy=%.3f,%.3f uv=%u,%u w=%.6f shade=%.5f,%.5f,%.5f\n",
+               self->water_diag.capture, self->water_diag.frame, diag_draw, i,
+               vertices[i].x, vertices[i].y, (unsigned)vertices[i].u,
+               (unsigned)vertices[i].v, vertices[i].w,
+               vertices[i].cf[0] * 255.0f, vertices[i].cf[1] * 255.0f,
+               vertices[i].cf[2] * 255.0f);
+   }
    *hd_texture_index_out = hd_texture_index; *filtering_out = filtering; *scaled_read_out = scaled_read; *shift_out = shift; *offset_uv_out = offset_uv;
    }
    }
@@ -9854,6 +9988,12 @@ static void renderer_snapshot_scaled_texture_reads(Renderer *self)
       else
          commandbuffer_copy_image(cbh_get(&self->cmd),
                dst, src, &offset, &offset, &extent);
+      if (self->water_diag.frames_left && log_cb)
+         log_cb(RETRO_LOG_INFO,
+               "[VK_WATER_SNAPSHOT] capture=%u frame=%u rect=%d,%d,%u,%u resolve=%u\n",
+               self->water_diag.capture, self->water_diag.frame,
+               rect->offset.x, rect->offset.y, rect->extent.width,
+               rect->extent.height, (unsigned)(self->msaa > 1));
    }
 
    commandbuffer_image_barrier(cbh_get(&self->cmd), dst,
@@ -19227,13 +19367,13 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
       shifted.y += self->renderpass.texture_offset_y;
 
       /* Domain domain = palette ? Domain_Unscaled : fbatlas_find_suitable_domain(self, shifted); */
-      fbatlas_sync_domain(self, domain, &shifted);
+      water_diag_sync(self, domain, &shifted, "texture-sync");
 
       { TTRect palette_rect = { self->renderpass.palette_offset_x, self->renderpass.palette_offset_y,
          self->renderpass.texture_mode == TextureMode_Palette8bpp ? 256u : 16u, 1 };
 
       if (palette && read_palette)
-         fbatlas_sync_domain(self, domain, &palette_rect);
+         water_diag_sync(self, domain, &palette_rect, "palette-sync");
 
       if (domain == Domain_Scaled && self->listener->scaling > 1)
       {
@@ -20716,6 +20856,34 @@ void rhi_vulkan_prepare_frame(void)
       !psx_hdr_active && psx_native_color != 0;
    renderer->render_state.dither_native_resolution =
       dither_mode == DITHER_NATIVE;
+
+   {
+      bool marker_down = dbg_input_state_cb && dbg_input_state_cb(
+            0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3) != 0;
+
+      renderer->water_diag.frame++;
+      if (renderer->water_diag.frames_left &&
+          --renderer->water_diag.frames_left == 0 && log_cb)
+         log_cb(RETRO_LOG_INFO,
+               "[VK_WATER_END] capture=%u indexed-draws=%u truncated=%u\n",
+               renderer->water_diag.capture, renderer->water_diag.draws,
+               (unsigned)(renderer->water_diag.draws > 4096u));
+      if (marker_down && !renderer->water_diag.marker_down)
+      {
+         renderer->water_diag.capture++;
+         renderer->water_diag.frames_left = 2;
+         renderer->water_diag.draws = 0;
+         if (log_cb)
+            log_cb(RETRO_LOG_INFO,
+                  "[VK_WATER_BEGIN] capture=%u frame=%u scale=%u msaa=%u "
+                  "hdr=%u precise=%u native=%u dither=%u format=%u\n",
+                  renderer->water_diag.capture, renderer->water_diag.frame,
+                  renderer->scaling, renderer->msaa, (unsigned)psx_hdr_active,
+                  (unsigned)psx_pgxp_color, (unsigned)renderer->render_state.native_color,
+                  (unsigned)dither_mode, (unsigned)renderer->scaled_fb_format);
+      }
+      renderer->water_diag.marker_down = marker_down;
+   }
 }
 
 static ScanoutMode get_scanout_mode(bool bpp24)
