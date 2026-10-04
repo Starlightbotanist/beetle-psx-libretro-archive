@@ -6228,6 +6228,10 @@ static bool retro_set_system_av_info(void)
    return environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &new_av_info);
 }
 
+#ifdef CRASH_SHADOW_DIAGNOSTIC
+extern void rhi_vulkan_shadow_diag_button(bool pressed);
+#endif
+
 void retro_run(void)
 {
    bool updated = false;
@@ -6455,6 +6459,11 @@ void retro_run(void)
       input_poll_cb();
 
    input_update(libretro_supports_bitmasks, input_state_cb);
+
+#ifdef CRASH_SHADOW_DIAGNOSTIC
+   rhi_vulkan_shadow_diag_button(input_state_cb &&
+         input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3));
+#endif
 
    /* Video CD transport. In HLE mode there is no PSX-side player to read the
     * pad, so the buttons have to reach the transport directly or the disc

@@ -24,7 +24,8 @@ enum
    RHI_LOAD_IMAGE,
    RHI_FILL_RECT,
    RHI_COPY_RECT,
-   RHI_TOGGLE_DISPLAY
+   RHI_TOGGLE_DISPLAY,
+   RHI_DIAGNOSTIC_MARKER
 };
 
 static void write_u32(uint32_t value)
@@ -106,6 +107,14 @@ void rhi_dump_finalize_frame(void)
    if (!file)
       return;
    write_u32(RHI_FINALIZE_FRAME);
+}
+
+void rhi_dump_marker(unsigned capture)
+{
+   if (!file)
+      return;
+   write_u32(RHI_DIAGNOSTIC_MARKER);
+   write_u32(capture);
 }
 
 void rhi_dump_set_tex_window(uint8_t tww, uint8_t twh, uint8_t twx, uint8_t twy)

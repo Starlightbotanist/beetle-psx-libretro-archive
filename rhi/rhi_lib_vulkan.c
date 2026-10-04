@@ -15,6 +15,9 @@
 #include <retro_inline.h>
 #include <math.h>
 #include "rhi_tt.h"
+#ifdef CRASH_SHADOW_DIAGNOSTIC
+#include "rhi_dump.h"
+#endif
 
 /* Force-inline shim for converted accessors. Must resolve to a real
  * always-inline so that the small accessor free functions retain identical
@@ -77,6 +80,28 @@ extern int   psx_native_color;
 /* Frontend save directory (libretro.c); the persistent pipeline cache lives
  * under it because it is the one directory the core already writes to. */
 extern char  retro_save_directory[4096];
+
+#ifdef CRASH_SHADOW_DIAGNOSTIC
+static unsigned shadow_diag_frame;
+static unsigned shadow_diag_capture;
+static unsigned shadow_diag_remaining;
+static unsigned shadow_diag_draw;
+static bool shadow_diag_button_down;
+
+void rhi_vulkan_shadow_diag_button(bool pressed)
+{
+   if (pressed && !shadow_diag_button_down && !shadow_diag_remaining)
+   {
+      shadow_diag_capture++;
+      shadow_diag_remaining = 12;
+      rhi_dump_marker(shadow_diag_capture);
+      if (log_cb)
+         log_cb(RETRO_LOG_INFO, "[shadow_diag] capture=%u start frame=%u\n",
+               shadow_diag_capture, shadow_diag_frame);
+   }
+   shadow_diag_button_down = pressed;
+}
+#endif
 
 /* VOLK_GENERATE_PROTOTYPES_H */
 #if defined(VK_VERSION_1_0)
@@ -9391,6 +9416,43 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
 
       output[i].color[3] = self->render_state.force_mask_bit ? 1.0f : 0.0f;
    } }
+#ifdef CRASH_SHADOW_DIAGNOSTIC
+   if (shadow_diag_remaining && log_cb)
+   {
+      unsigned i;
+      unsigned draw = shadow_diag_draw++;
+      log_cb(RETRO_LOG_INFO,
+            "[shadow_diag] capture=%u frame=%u draw=%u count=%u type=%u texture=%u blend=%u scaled=%u shift=%u filter=%u offset=%u scale=%u msaa=%u mask=%u setmask=%u page=%u,%u clut=%u,%u rect=%u,%u,%u,%u window=%u,%u,%u,%u limits=%u,%u,%u,%u\n",
+            shadow_diag_capture, shadow_diag_frame, draw, count,
+            (unsigned)self->render_state.primitive_type,
+            (unsigned)self->render_state.texture_mode,
+            (unsigned)self->render_state.semi_transparent,
+            (unsigned)scaled_read, shift, (unsigned)filtering,
+            (unsigned)offset_uv, self->scaling, self->msaa,
+            (unsigned)self->render_state.mask_test,
+            (unsigned)self->render_state.force_mask_bit,
+            self->render_state.texture_offset_x,
+            self->render_state.texture_offset_y,
+            self->render_state.palette_offset_x,
+            self->render_state.palette_offset_y,
+            self->render_state.draw_rect.x, self->render_state.draw_rect.y,
+            self->render_state.draw_rect.width, self->render_state.draw_rect.height,
+            self->render_state.texture_window.mask_x,
+            self->render_state.texture_window.mask_y,
+            self->render_state.texture_window.or_x,
+            self->render_state.texture_window.or_y,
+            self->render_state.UVLimits.min_u, self->render_state.UVLimits.min_v,
+            self->render_state.UVLimits.max_u, self->render_state.UVLimits.max_v);
+      for (i = 0; i < count; i++)
+         log_cb(RETRO_LOG_INFO,
+               "[shadow_diag] vertex capture=%u frame=%u draw=%u i=%u xyzw=%.9g,%.9g,%.9g,%.9g uv=%d,%d color=%.9g,%.9g,%.9g,%.9g params=%u\n",
+               shadow_diag_capture, shadow_diag_frame, draw, i,
+               output[i].x, output[i].y, output[i].z, output[i].w,
+               (int)output[i].u, (int)output[i].v,
+               output[i].color[0], output[i].color[1], output[i].color[2],
+               output[i].color[3], (unsigned)(uint16_t)output[i].params);
+   }
+#endif
    *hd_texture_index_out = hd_texture_index; *filtering_out = filtering; *scaled_read_out = scaled_read; *shift_out = shift; *offset_uv_out = offset_uv;
    }
    }
@@ -20674,6 +20736,10 @@ void rhi_vulkan_apply_pending_geometry(void)
 
 void rhi_vulkan_prepare_frame(void)
 {
+#ifdef CRASH_SHADOW_DIAGNOSTIC
+   shadow_diag_frame++;
+   shadow_diag_draw = 0;
+#endif
    if (device == NULL)
    {
       /* The HW context is down (between context_destroy and the next
@@ -20731,6 +20797,15 @@ void rhi_vulkan_finalize_frame(const void *fb, unsigned width,
 {
    unsigned index;
    ImageHandle scanout;
+#ifdef CRASH_SHADOW_DIAGNOSTIC
+   if (shadow_diag_remaining)
+   {
+      shadow_diag_remaining--;
+      if (!shadow_diag_remaining && log_cb)
+         log_cb(RETRO_LOG_INFO, "[shadow_diag] capture=%u complete frame=%u\n",
+               shadow_diag_capture, shadow_diag_frame);
+   }
+#endif
    if (device == NULL)
       return;
 

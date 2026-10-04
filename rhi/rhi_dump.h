@@ -13,6 +13,7 @@ void rhi_dump_deinit(void);
 
 void rhi_dump_prepare_frame(void);
 void rhi_dump_finalize_frame(void);
+void rhi_dump_marker(unsigned capture);
 
 void rhi_dump_set_tex_window(uint8_t tww, uint8_t twh, uint8_t twx, uint8_t twy);
 void rhi_dump_set_draw_offset(int16_t x, int16_t y);
