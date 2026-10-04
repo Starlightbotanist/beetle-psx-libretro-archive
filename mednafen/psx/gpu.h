@@ -322,6 +322,11 @@ uint32_t GPU_Read(const int32_t timestamp, uint32_t A);
 void GPU_StartFrame(EmulateSpecStruct *espec_arg);
 void GPU_FlushDeferredScanout(void);
 
+/* Local diagnostic: R3 captures UV decisions without altering GPU state. */
+void GPU_UVDiagReset(void);
+bool GPU_UVDiagBeginFrame(bool marker);
+void GPU_UVDiagEndFrame(void);
+
 /* Resets the per-dest_line cache that lets the SW renderer skip
  * re-zeroing margin pixels each frame when geometry is unchanged.
  * Must be called whenever the surface storage has been replaced

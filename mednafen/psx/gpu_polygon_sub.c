@@ -13,6 +13,101 @@
 #include "../../beetle_psx_globals.h"
 
 #include <retro_miscellaneous.h>
+#include <inttypes.h>
+#include <string.h>
+
+extern retro_log_printf_t log_cb;
+
+/* Buffer the whole burst before logging, so file I/O cannot intervene
+ * between the polygon decoder's reads and writes. Diagnostic state is
+ * deliberately separate from PS_GPU and is not part of a savestate. */
+#define UV_DIAG_FRAMES 12
+#define UV_DIAG_PER_FRAME 2048
+
+struct uv_diag_record
+{
+	tri_vertex vertices[3];
+	int64_t area, tex_area, dudx, dudy, dvdx, dvdy;
+	unsigned frame, sequence, count, command, continuation;
+	unsigned page_x, page_y, mode, clut, window_x, window_y;
+	unsigned inherited_u, inherited_v, inherited_2d;
+	unsigned off_u, off_v, may_be_2d, is_3d;
+	unsigned min_u, min_v, max_u, max_v, has_limits;
+};
+
+static struct uv_diag_record uv_diag_records[UV_DIAG_FRAMES * UV_DIAG_PER_FRAME];
+static unsigned uv_diag_frame, uv_diag_burst, uv_diag_remaining;
+static unsigned uv_diag_used, uv_diag_seen, uv_diag_dropped;
+static bool uv_diag_marker_down;
+static struct uv_diag_record *uv_diag_pending;
+
+void GPU_UVDiagReset(void)
+{
+	if (uv_diag_remaining && log_cb)
+		log_cb(RETRO_LOG_INFO, "[UV-DIAG] aborted burst=%u records=%u\n",
+				uv_diag_burst, uv_diag_used);
+	uv_diag_frame = uv_diag_burst = uv_diag_remaining = 0;
+	uv_diag_used = uv_diag_seen = uv_diag_dropped = 0;
+	uv_diag_marker_down = false;
+	uv_diag_pending = NULL;
+}
+
+bool GPU_UVDiagBeginFrame(bool marker)
+{
+	bool started = marker && !uv_diag_marker_down && !uv_diag_remaining;
+	uv_diag_marker_down = marker;
+	uv_diag_frame++;
+	uv_diag_seen = 0;
+	uv_diag_pending = NULL;
+	if (started)
+	{
+		uv_diag_burst++;
+		uv_diag_remaining = UV_DIAG_FRAMES;
+		uv_diag_used = uv_diag_dropped = 0;
+		if (log_cb)
+			log_cb(RETRO_LOG_INFO,
+					"[UV-DIAG] begin burst=%u frame=%u frames=%u cap_per_frame=%u\n",
+					uv_diag_burst, uv_diag_frame, UV_DIAG_FRAMES, UV_DIAG_PER_FRAME);
+	}
+	return started;
+}
+
+void GPU_UVDiagEndFrame(void)
+{
+	unsigned i;
+	uv_diag_pending = NULL;
+	if (!uv_diag_remaining || --uv_diag_remaining)
+		return;
+	if (!log_cb)
+		return;
+	for (i = 0; i < uv_diag_used; i++)
+	{
+		const struct uv_diag_record *r = &uv_diag_records[i];
+		log_cb(RETRO_LOG_INFO,
+				"[UV-DIAG] draw burst=%u f=%u seq=%u n=%u cmd=%02x continuation=%u "
+				"page=%u,%u mode=%u clut=%u window=%u,%u "
+				"inherited=%u,%u,%u off=%u,%u sprite=%u depth_varies=%u "
+				"area=%" PRId64 " texarea=%" PRId64 " deriv=%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 " "
+				"limits_valid=%u limits=%u,%u,%u,%u "
+				"a=%d,%d,%d,%d/%.6g,%.6g,%.6g "
+				"b=%d,%d,%d,%d/%.6g,%.6g,%.6g "
+				"c=%d,%d,%d,%d/%.6g,%.6g,%.6g\n",
+				uv_diag_burst, r->frame, r->sequence, r->count, r->command, r->continuation,
+				r->page_x, r->page_y, r->mode, r->clut, r->window_x, r->window_y,
+				r->inherited_u, r->inherited_v, r->inherited_2d,
+				r->off_u, r->off_v, r->may_be_2d, r->is_3d,
+				r->area, r->tex_area, r->dudx, r->dudy, r->dvdx, r->dvdy,
+				r->has_limits, r->min_u, r->min_v, r->max_u, r->max_v,
+				r->vertices[0].x, r->vertices[0].y, r->vertices[0].u, r->vertices[0].v,
+				r->vertices[0].precise[0], r->vertices[0].precise[1], r->vertices[0].precise[2],
+				r->vertices[1].x, r->vertices[1].y, r->vertices[1].u, r->vertices[1].v,
+				r->vertices[1].precise[0], r->vertices[1].precise[1], r->vertices[1].precise[2],
+				r->vertices[2].x, r->vertices[2].y, r->vertices[2].u, r->vertices[2].v,
+				r->vertices[2].precise[0], r->vertices[2].precise[1], r->vertices[2].precise[2]);
+	}
+	log_cb(RETRO_LOG_INFO, "[UV-DIAG] end burst=%u records=%u dropped=%u\n",
+			uv_diag_burst, uv_diag_used, uv_diag_dropped);
+}
 
 /* Determine whether to offset UVs to account for difference in interpolation between PS1 and modern GPUs */
 void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned count)
@@ -73,6 +168,41 @@ void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned cou
 
 		/* Leverage PGXP to further avoid 3D polygons that just happen to align this way after projection */
 		bool is3D = ((vertices[0].precise[2] != vertices[1].precise[2]) || (vertices[1].precise[2] != vertices[2].precise[2]));
+
+		uv_diag_pending = NULL;
+		if (uv_diag_remaining)
+		{
+			if (uv_diag_seen++ < UV_DIAG_PER_FRAME)
+			{
+				struct uv_diag_record *r = &uv_diag_records[uv_diag_used++];
+				memset(r, 0, sizeof(*r));
+				memcpy(r->vertices, vertices, sizeof(r->vertices));
+				r->frame = uv_diag_frame;
+				r->sequence = uv_diag_seen;
+				r->count = count;
+				r->command = gpu->InCmd_CC;
+				r->continuation = gpu->InCmd == INCMD_QUAD;
+				r->page_x = gpu->TexPageX;
+				r->page_y = gpu->TexPageY;
+				r->mode = gpu->TexMode;
+				r->clut = gpu->CLUT_Cache_VB;
+				r->window_x = gpu->SUCV.TWX_AND;
+				r->window_y = gpu->SUCV.TWY_AND;
+				r->inherited_u = off_u;
+				r->inherited_v = off_v;
+				r->inherited_2d = may_be_2d;
+				r->area = area;
+				r->tex_area = texArea;
+				r->dudx = dudx;
+				r->dudy = dudy;
+				r->dvdx = dvdx;
+				r->dvdy = dvdy;
+				r->is_3d = is3D;
+				uv_diag_pending = r;
+			}
+			else
+				uv_diag_dropped++;
+		}
 
 		/* Shouldn't matter as degenerate primitives will be culled anyways. */
 		if ((area != 0) && (texArea != 0) && !is3D)
@@ -150,6 +280,12 @@ void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned cou
 	gpu->off_u = off_u;
 	gpu->off_v = off_v;
 	gpu->may_be_2d = may_be_2d;
+	if (uv_diag_pending)
+	{
+		uv_diag_pending->off_u = off_u;
+		uv_diag_pending->off_v = off_v;
+		uv_diag_pending->may_be_2d = may_be_2d;
+	}
 }
 
 /* Reset min/max UVs for primitive */
@@ -252,6 +388,15 @@ void Finalise_UVLimits(PS_GPU *gpu)
 	gpu->min_v = min_v;
 	gpu->max_u = max_u;
 	gpu->max_v = max_v;
+	if (uv_diag_pending)
+	{
+		uv_diag_pending->min_u = min_u;
+		uv_diag_pending->min_v = min_v;
+		uv_diag_pending->max_u = max_u;
+		uv_diag_pending->max_v = max_v;
+		uv_diag_pending->has_limits = true;
+		uv_diag_pending = NULL;
+	}
 }
 
 

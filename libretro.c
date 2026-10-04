@@ -4370,6 +4370,7 @@ void retro_init(void)
 
 void retro_reset(void)
 {
+   GPU_UVDiagReset();
    /* PSX_Power() touches MainRAM, PSX_CPU, etc. - all NULL before
     * retro_load_game and after retro_unload_game. */
    if (!MainRAM || !PSX_CPU || !PSX_FIO)
@@ -5926,6 +5927,8 @@ bool retro_load_game(const struct retro_game_info *info)
    bool ret;
    struct retro_core_option_display option_display;
 
+   GPU_UVDiagReset();
+
    if (!info || !info->path)
       return false;
 
@@ -6193,6 +6196,7 @@ bool retro_load_game(const struct retro_game_info *info)
 
 void retro_unload_game(void)
 {
+   GPU_UVDiagReset();
    VCD_SetMode(VCD_MODE_OFF);
    VCD_Reset();
 
@@ -6226,6 +6230,32 @@ static bool retro_set_system_av_info(void)
 
    retro_get_system_av_info(&new_av_info);
    return environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &new_av_info);
+}
+
+static void uv_diag_log_settings(void)
+{
+   unsigned i;
+   static const char *keys[] =
+   {
+      BEETLE_OPT(renderer), BEETLE_OPT(internal_resolution),
+      BEETLE_OPT(super_sampling), BEETLE_OPT(scaled_uv_offset),
+      BEETLE_OPT(pgxp_mode), BEETLE_OPT(pgxp_texture),
+      BEETLE_OPT(filter), BEETLE_OPT(msaa), BEETLE_OPT(dither_mode),
+      BEETLE_OPT(native_color)
+   };
+   log_cb(RETRO_LOG_INFO,
+         "[UV-DIAG] actual renderer=%u sw_shift=%u hw_shift=%u hdr=%u pgxp=%u filter=%d\n",
+         (unsigned)rhi_intf_is_type(), (unsigned)psx_gpu_upscale_shift,
+         (unsigned)psx_gpu_upscale_shift_hw, (unsigned)psx_hdr_active,
+         (unsigned)psx_pgxp_mode, filter_mode);
+   for (i = 0; i < sizeof(keys) / sizeof(keys[0]); i++)
+   {
+      struct retro_variable var = {0};
+      var.key = keys[i];
+      environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var);
+      log_cb(RETRO_LOG_INFO, "[UV-DIAG] requested %s=%s\n",
+            keys[i], var.value ? var.value : "unknown");
+   }
 }
 
 void retro_run(void)
@@ -6455,6 +6485,10 @@ void retro_run(void)
       input_poll_cb();
 
    input_update(libretro_supports_bitmasks, input_state_cb);
+
+   if (GPU_UVDiagBeginFrame(input_state_cb &&
+            input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R3)))
+      uv_diag_log_settings();
 
    /* Video CD transport. In HLE mode there is no PSX-side player to read the
     * pad, so the buttons have to reach the transport directly or the disc
@@ -6782,6 +6816,8 @@ void retro_run(void)
    /* LED interface */
    if (led_state_cb)
       retro_led_interface();
+
+   GPU_UVDiagEndFrame();
 }
 
 void retro_get_system_info(struct retro_system_info *info)
@@ -6819,6 +6855,7 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
  * caused subtle misbehavior. */
 void retro_deinit(void)
 {
+   GPU_UVDiagReset();
    VCD_Kill();
    input_deinit_env();
 
@@ -7076,6 +7113,8 @@ bool retro_unserialize(const void *data, size_t size)
    PGXP_GTE_InvalidateFogRing();
    StateMem st;
    bool okay;
+
+   GPU_UVDiagReset();
 
    /* Frontends should only call this when a game is loaded, but be
     * defensive: MDFNSS_LoadSM walks every subsystem's StateAction
