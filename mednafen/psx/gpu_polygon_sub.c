@@ -31,6 +31,7 @@ struct uv_diag_record
 	unsigned frame, sequence, count, command, continuation;
 	unsigned page_x, page_y, mode, clut, window_x, window_y;
 	unsigned inherited_u, inherited_v, inherited_2d;
+	unsigned heuristic_u, heuristic_v, heuristic_2d, bypass;
 	unsigned off_u, off_v, may_be_2d, is_3d;
 	unsigned min_u, min_v, max_u, max_v, has_limits;
 };
@@ -66,7 +67,7 @@ bool GPU_UVDiagBeginFrame(bool marker)
 		uv_diag_used = uv_diag_dropped = 0;
 		if (log_cb)
 			log_cb(RETRO_LOG_INFO,
-					"[UV-DIAG] begin burst=%u frame=%u frames=%u cap_per_frame=%u\n",
+					"[UV-DIAG] begin burst=%u frame=%u frames=%u cap_per_frame=%u variant=vk2x-polygon-correction-bypass\n",
 					uv_diag_burst, uv_diag_frame, UV_DIAG_FRAMES, UV_DIAG_PER_FRAME);
 	}
 	return started;
@@ -87,6 +88,7 @@ void GPU_UVDiagEndFrame(void)
 				"[UV-DIAG] draw burst=%u f=%u seq=%u n=%u cmd=%02x continuation=%u "
 				"page=%u,%u mode=%u clut=%u window=%u,%u "
 				"inherited=%u,%u,%u off=%u,%u sprite=%u depth_varies=%u "
+				"heuristic=%u,%u,%u bypass=%u "
 				"area=%" PRId64 " texarea=%" PRId64 " deriv=%" PRId64 ",%" PRId64 ",%" PRId64 ",%" PRId64 " "
 				"limits_valid=%u limits=%u,%u,%u,%u "
 				"a=%d,%d,%d,%d/%.6g,%.6g,%.6g "
@@ -96,6 +98,7 @@ void GPU_UVDiagEndFrame(void)
 				r->page_x, r->page_y, r->mode, r->clut, r->window_x, r->window_y,
 				r->inherited_u, r->inherited_v, r->inherited_2d,
 				r->off_u, r->off_v, r->may_be_2d, r->is_3d,
+				r->heuristic_u, r->heuristic_v, r->heuristic_2d, r->bypass,
 				r->area, r->tex_area, r->dudx, r->dudy, r->dvdx, r->dvdy,
 				r->has_limits, r->min_u, r->min_v, r->max_u, r->max_v,
 				r->vertices[0].x, r->vertices[0].y, r->vertices[0].u, r->vertices[0].v,
@@ -275,6 +278,25 @@ void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned cou
 				}
 			}
 		}
+	}
+
+	if (uv_diag_pending)
+	{
+		uv_diag_pending->heuristic_u = off_u;
+		uv_diag_pending->heuristic_v = off_v;
+		uv_diag_pending->heuristic_2d = may_be_2d;
+	}
+
+	/* Diagnostic only: isolate the sprite heuristic's whole-texel offsets
+	 * and clamp/type changes from interpolation at Vulkan 2x. This is not
+	 * a replacement for the corrections needed by flipped 2D polygons.
+	 * Preserve vertex fixups, other renderers and other hardware scales. */
+	if (rhi_intf_is_type() == RHI_VULKAN && psx_gpu_upscale_shift_hw == 1)
+	{
+		off_u = off_v = 0;
+		may_be_2d = false;
+		if (uv_diag_pending)
+			uv_diag_pending->bypass = true;
 	}
 
 	gpu->off_u = off_u;
