@@ -10,6 +10,7 @@
 #include "rhi_lib_vulkan.h"
 
 #include "rhi_intf.h" /* FPS and audio sample rate macros */
+#include "rhi_interpolation.h"
 #include "rhi_defer.h"
 #include "tt_trace.h"
 #include <retro_inline.h>
@@ -9544,15 +9545,6 @@ static void renderer_draw_line(Renderer *self, const Vertex *vertices)
    renderer_draw_quad(self, vert, false, vertices);
 }
 
-/* Only the low 20 bits survive an 8.12 accumulator. Reuse the same
- * encoding for colour and UV: origin20/dx12, followed by dx8/dy20. */
-static void renderer_pack_interpolant(uint32_t *packed,
-      uint32_t origin, uint32_t dx, uint32_t dy)
-{
-   packed[0] = (origin & 0xfffffu) | (dx << 20);
-   packed[1] = ((dx >> 12) & 0xffu) | ((dy & 0xfffffu) << 8);
-}
-
 /* The packed payload is shared by polygon and line colour interpolation.
  * Preserve mask alpha and the original byte colour for enhanced shading. */
 static void renderer_set_native_color_plane(BufferVertex *output,
@@ -9575,10 +9567,9 @@ static void renderer_set_native_color_plane(BufferVertex *output,
 static void renderer_build_native_line_colors(Renderer *self,
       BufferVertex *output, const Vertex *vertices)
 {
-   int32_t x[2], y[2], dx, dy, steps;
-   uint32_t planes[6];
-   unsigned i, c, anchor;
-   bool horizontal;
+   int32_t x[2], y[2];
+   uint32_t planes[6], colors[2];
+   unsigned i;
 
    if (!self->render_state.native_color || self->scaling != 1 ||
        self->msaa != 1 || psx_pgxp_mode != 0 ||
@@ -9597,27 +9588,10 @@ static void renderer_build_native_line_colors(Renderer *self,
       if ((float)x[i] != px || (float)y[i] != py)
          return;
    }
-   dx = x[1] - x[0];
-   dy = y[1] - y[0];
-   horizontal = abs(dx) > abs(dy);
-   steps = horizontal ? abs(dx) : abs(dy);
-   if (!steps)
+   colors[0] = vertices[0].color;
+   colors[1] = vertices[1].color;
+   if (!rhi_line_color_planes(planes, x, y, colors))
       return;
-   /* DrawLine swaps endpoints on descending X, including equal-major ties. */
-   anchor = x[0] > x[1] ? 1 : 0;
-   for (c = 0; c < 3; c++)
-   {
-      int32_t first = (vertices[anchor].color >> (c * 8)) & 255;
-      int32_t last = (vertices[1 - anchor].color >> (c * 8)) & 255;
-      int32_t step = (last - first) * 4096 / steps;
-      int32_t direction = horizontal ? x[1 - anchor] - x[anchor] :
-            y[1 - anchor] - y[anchor];
-      uint32_t slope = (uint32_t)(direction < 0 ? -step : step);
-      uint32_t origin = ((uint32_t)first << 12) + 2048u - slope *
-            (uint32_t)(horizontal ? x[anchor] : y[anchor]);
-      renderer_pack_interpolant(planes + c * 2, origin,
-            horizontal ? slope : 0u, horizontal ? 0u : slope);
-   }
    for (i = 0; i < 6; i++)
       renderer_set_native_color_plane(output + i, planes,
             vertices[i < 2 || i == 3 ? 0 : 1].color);
@@ -9661,24 +9635,16 @@ static void renderer_build_native_interpolants(Renderer *self,
       return;
 
    /* Match DrawTriangle's core-vertex choice, including equal-X ties. */
-   anchor = x[1] <= x[0] ? (x[2] <= x[1] ? 2 : 1) :
-         (x[2] < x[0] ? 2 : 0);
+   anchor = rhi_triangle_anchor(x);
    for (c = 0; c < 5; c++)
    {
       int32_t value[3];
-      uint32_t dx, dy, origin;
       if (c < 3 ? !color : !uv)
          continue;
       for (i = 0; i < 3; i++)
          value[i] = c < 3 ? ((vertices[i].color >> (c * 8)) & 255) :
                (c == 3 ? vertices[i].u : vertices[i].v);
-      dx = (uint32_t)(((int64_t)(value[1] - value[0]) * (y[2] - y[1]) -
-            (int64_t)(value[2] - value[1]) * (y[1] - y[0])) * 4096 / denom);
-      dy = (uint32_t)(((int64_t)(x[1] - x[0]) * (value[2] - value[1]) -
-            (int64_t)(x[2] - x[1]) * (value[1] - value[0])) * 4096 / denom);
-      origin = ((uint32_t)value[anchor] << 12) + 2048u -
-            dx * (uint32_t)x[anchor] - dy * (uint32_t)y[anchor];
-      renderer_pack_interpolant(planes + c * 2, origin, dx, dy);
+      rhi_triangle_interpolant(planes + c * 2, x, y, value, denom, anchor);
    }
    for (i = 0; i < 3; i++)
    {

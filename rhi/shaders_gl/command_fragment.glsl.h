@@ -83,6 +83,16 @@ uniform uint force_mask_bit;
 
 in vec3 frag_shading_color;
 in vec4 frag_fog;
+)
+#if !defined(FILTER_SABR) && !defined(FILTER_XBR)
+STRINGIZE(
+flat in uint frag_native_color_plane;
+flat in uvec3 frag_color_origin;
+flat in uvec3 frag_color_dx;
+flat in uvec3 frag_color_dy;
+)
+#endif
+STRINGIZE(
 
 // The depth-cue mix runs per vertex on the CPU in the console's own gamma
 // domain (see gpu_polygon.c); the vertex arrives with the FINISHED colour
@@ -96,6 +106,20 @@ in vec4 frag_fog;
 // use, and placing it above them is a compile error that core-profile
 // drivers reject, taking the whole renderer down with it.
 vec3 pgxp_shading() {
+)
+#if !defined(FILTER_SABR) && !defined(FILTER_XBR)
+STRINGIZE(
+   if (frag_native_color_plane != 0u) {
+      // Primitive passes use a zero-origin, full-VRAM viewport. Scissors
+      // clip drawing without changing these integer VRAM coordinates.
+      uvec2 coord = uvec2(gl_FragCoord.xy);
+      uvec3 accum = frag_color_origin + coord.x * frag_color_dx +
+            coord.y * frag_color_dy;
+      return vec3((accum >> 12u) & 255u) / 255.0;
+   }
+)
+#endif
+STRINGIZE(
    if (pgxp_fog == 0u || frag_fog.a <= 0.)
       return frag_shading_color;
    return mix(max(vec3(frag_shading_color), vec3(0.)),

@@ -18,6 +18,7 @@
 #include "libretro_options.h"
 
 #include "rhi_intf.h" /* enums */
+#include "rhi_interpolation.h"
 #include "rhi_tt.h"  /* shared HD texture replacement/tracking engine */
 #include "rhi_defer.h"
 #include "tt_trace.h"
@@ -37,6 +38,7 @@ extern int   psx_hdr_expand_gamut;
 extern int   psx_hdr_shoulder;
 extern int   psx_hdr_sdr_eotf;
 extern int   psx_hdr_overbright_hot;
+extern unsigned int psx_pgxp_mode;
 extern int   psx_pgxp_color;   /* PGXP precise colour: vertex colour may exceed 1.0 on fp16 */
 extern int   psx_pgxp_fog;     /* PGXP linear-light depth cue; effective only with precise colour */
 extern int   psx_src_primaries;
@@ -225,6 +227,10 @@ static void gl_normalize_inherited_state(void)
    /* PS1 dithering is applied in the draw shader. Driver dithering would
     * also alter exact VRAM uploads and copies into the RGB5_A1 target. */
    glDisable(GL_DITHER);
+#ifndef HAVE_OPENGLES3
+   /* Per-triangle flat attributes use the last vertex, as required by ES. */
+   glProvokingVertex(GL_LAST_VERTEX_CONVENTION);
+#endif
    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
    glPixelStorei(GL_UNPACK_ALIGNMENT,   4);
@@ -715,6 +721,9 @@ struct gl_command_vertex {
    uint8_t framebuffer_feedback;
    /* Read indexed colors from the retained CLUT instead of live VRAM. */
    uint8_t palette_cached;
+   /* Packed native RGB planes use the otherwise unused precise-colour
+    * lanes. This byte occupies existing padding before fog. */
+   uint8_t native_color_plane;
    /* Depth-cue sidecar: far colour (1.0 == 0xFF) in [0..2], blend factor in
     * [3]. t == 0 makes the shader mix the identity, so vertices without a
     * recovered cue cost nothing. KEEP LAST -- positional initializers above
@@ -5420,10 +5429,90 @@ static void vertex_add_blended_pass(
    }
 }
 
+/* Native planes replace colour/fog only on the provoking vertex. The
+ * original packed colour keeps its smooth fallback value available to the
+ * other triangle in a quad. Enhanced geometry/colour never uses these lanes. */
+static void gl_set_native_color_plane(gl_command_vertex *v,
+      const uint32_t *planes, uint32_t color)
+{
+   memcpy(v->color, planes, 3 * sizeof(uint32_t));
+   memcpy(v->fog, planes + 3, 3 * sizeof(uint32_t));
+   memcpy(v->fog + 3, &color, sizeof(color));
+   v->native_color_plane = 1;
+}
+
+static bool gl_native_color_positions(const gl_renderer *renderer,
+      const gl_command_vertex *v, unsigned count, HdTextureHandle hd,
+      int32_t *x, int32_t *y)
+{
+   unsigned i;
+   if (renderer->internal_color_depth != 16 || renderer->fb_out_fp16 ||
+       renderer->internal_upscaling != 1 || psx_pgxp_mode != 0 ||
+       psx_pgxp_color || renderer->filter_type != FILTER_MODE_NEAREST ||
+       !hd_handle_is_none(&hd) || v[0].texture_blend_mode == 1)
+      return false;
+   for (i = 0; i < count; i++)
+   {
+      float px = v[i].position[0] + renderer->config.draw_offset[0];
+      float py = v[i].position[1] + renderer->config.draw_offset[1];
+      if (v[i].position[3] != 1.0f ||
+          !(px >= -32768.0f && px <= 32767.0f) ||
+          !(py >= -32768.0f && py <= 32767.0f))
+         return false;
+      x[i] = (int32_t)px;
+      y[i] = (int32_t)py;
+      if ((float)x[i] != px || (float)y[i] != py)
+         return false;
+   }
+   return true;
+}
+
+/* Queued GP0 colours and draw-offset-adjusted positions are authoritative.
+ * The wrapped 8.12 planes travel with the primitive; no side state survives
+ * a flush, reset or savestate restore. Flat colours need no plane. */
+static void gl_build_native_triangle_colors(gl_renderer *renderer,
+      gl_command_vertex *v, const uint32_t *colors, HdTextureHandle hd)
+{
+   int32_t x[3], y[3];
+   int64_t denom;
+   uint32_t planes[6];
+   unsigned i, c, anchor;
+   if (colors[0] == colors[1] && colors[0] == colors[2])
+      return;
+   if (!gl_native_color_positions(renderer, v, 3, hd, x, y))
+      return;
+   denom = (int64_t)(x[1] - x[0]) * (y[2] - y[1]) -
+         (int64_t)(x[2] - x[1]) * (y[1] - y[0]);
+   if (!denom)
+      return;
+   anchor = rhi_triangle_anchor(x);
+   for (c = 0; c < 3; c++)
+   {
+      int32_t value[3];
+      for (i = 0; i < 3; i++)
+         value[i] = (colors[i] >> (c * 8)) & 255;
+      rhi_triangle_interpolant(planes + c * 2, x, y, value, denom, anchor);
+   }
+   gl_set_native_color_plane(v + 2, planes, colors[2]);
+}
+
+static void gl_build_native_line_colors(gl_renderer *renderer,
+      gl_command_vertex *v, const uint32_t *colors, HdTextureHandle hd)
+{
+   int32_t x[2], y[2];
+   uint32_t planes[6];
+   if (colors[0] == colors[1] ||
+       !gl_native_color_positions(renderer, v, 2, hd, x, y) ||
+       !rhi_line_color_planes(planes, x, y, colors))
+      return;
+   gl_set_native_color_plane(v + 1, planes, colors[1]);
+}
+
 static void push_primitive(
       gl_renderer *renderer,
       gl_command_vertex *v,
       unsigned count,
+      const uint32_t *colors,
       GLenum mode,
       gl_semi_transparency_mode stm,
       bool mask_test,
@@ -5447,6 +5536,10 @@ static void push_primitive(
        * renderer_build_attribs). Untextured primitives short-circuit to
        * a none handle inside the query. */
       HdTextureHandle hd = gl_tt_query_hd(renderer, v);
+      if (colors && count == 3)
+         gl_build_native_triangle_colors(renderer, v, colors, hd);
+      else if (colors && count == 2)
+         gl_build_native_line_colors(renderer, v, colors, hd);
       vertex_preprocessing(renderer, v, count, mode, stm, mask_test, set_mask, hd);
    }
 
@@ -5476,8 +5569,8 @@ static void push_primitive(
  * accessor helpers since the layouts never change at runtime. */
 static const struct gl_attribute gl_command_vertex_attribs[] = {
    { "position",           offsetof(gl_command_vertex, position),           GL_FLOAT,          4 },
-   { "color",              offsetof(gl_command_vertex, color),              GL_FLOAT,          3 },
-   { "fog",                offsetof(gl_command_vertex, fog),                GL_FLOAT,          4 },
+   { "color",              offsetof(gl_command_vertex, color),              GL_UNSIGNED_INT,   3 },
+   { "fog",                offsetof(gl_command_vertex, fog),                GL_UNSIGNED_INT,   4 },
    { "texture_coord",      offsetof(gl_command_vertex, texture_coord),      GL_UNSIGNED_SHORT, 2 },
    { "texture_page",       offsetof(gl_command_vertex, texture_page),       GL_UNSIGNED_SHORT, 2 },
    { "clut",               offsetof(gl_command_vertex, clut),               GL_UNSIGNED_SHORT, 2 },
@@ -5490,6 +5583,8 @@ static const struct gl_attribute gl_command_vertex_attribs[] = {
       offsetof(gl_command_vertex, framebuffer_feedback), GL_UNSIGNED_BYTE, 1 },
    { "palette_cached",
       offsetof(gl_command_vertex, palette_cached), GL_UNSIGNED_BYTE, 1 },
+   { "native_color_plane",
+      offsetof(gl_command_vertex, native_color_plane), GL_UNSIGNED_BYTE, 1 },
    { "texture_limits",     offsetof(gl_command_vertex, texture_limits),     GL_UNSIGNED_SHORT, 4 }
 };
 
@@ -6962,9 +7057,12 @@ void rhi_gl_push_triangle(
            for (_fc = 0; _fc < 4; _fc++)
               v[_fi].fog[_fc] = fog ? fog[_fi * 4 + _fc] : 0.0f; }
 
-      gl_vram_sync_primitive(renderer, v, 3);
-      push_primitive(renderer, v, 3, GL_TRIANGLES,
-            semi_transparency_mode, mask_test, set_mask);
+      {
+         uint32_t colors[3] = {c0, c1, c2};
+         gl_vram_sync_primitive(renderer, v, 3);
+         push_primitive(renderer, v, 3, colors, GL_TRIANGLES,
+               semi_transparency_mode, mask_test, set_mask);
+      }
    }
 }
 
@@ -7116,6 +7214,11 @@ void rhi_gl_push_quad(
       {
          /* Per-primitive HD replacement query (see push_primitive). */
          HdTextureHandle hd = gl_tt_query_hd(renderer, v);
+         uint32_t colors[4] = {c0, c1, c2, c3};
+         /* Indices 0,1,2 and 1,2,3 have distinct last vertices. Pack
+          * each triangle's flat plane there without expanding the quad. */
+         gl_build_native_triangle_colors(renderer, v + 1, colors + 1, hd);
+         gl_build_native_triangle_colors(renderer, v, colors, hd);
          vertex_preprocessing(renderer, v, 4,
                GL_TRIANGLES, semi_transparency_mode, mask_test, set_mask, hd);
       }
@@ -7318,13 +7421,14 @@ void rhi_gl_push_line(
          triangles[3] = quad[3];
          triangles[4] = quad[2];
          triangles[5] = quad[1];
-         push_primitive(renderer, triangles, 6,
+         push_primitive(renderer, triangles, 6, NULL,
                GL_TRIANGLES, semi_transparency_mode, mask_test, set_mask);
       }
       else
       {
+         uint32_t colors[2] = {c0, c1};
          gl_vram_sync_primitive(renderer, v, 2);
-         push_primitive(renderer, v, 2,
+         push_primitive(renderer, v, 2, colors,
                GL_LINES, semi_transparency_mode, mask_test, set_mask);
       }
    }

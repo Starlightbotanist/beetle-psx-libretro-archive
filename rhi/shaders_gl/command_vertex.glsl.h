@@ -10,8 +10,8 @@
 static const char * command_vertex_name_ = GLSL_VERTEX(
 // Vertex shader for rendering GPU draw commands in the framebuffer
 in vec4 position;
-in vec3 color;
-in vec4 fog;
+in uvec3 color;
+in uvec4 fog;
 in uvec2 texture_page;
 in uvec2 texture_coord;
 in uvec2 clut;
@@ -23,6 +23,7 @@ in uvec4 texture_window;
 in uvec4 texture_limits;
 in uint framebuffer_feedback;
 in uint palette_cached;
+in uint native_color_plane;
 
 // Drawing offset
 uniform ivec2 offset;
@@ -41,6 +42,15 @@ flat out uvec4 frag_texture_limits;
 flat out uint frag_framebuffer_feedback;
 flat out uint frag_palette_cached;
 )
+
+#if !defined(FILTER_SABR) && !defined(FILTER_XBR)
+STRINGIZE(
+flat out uint frag_native_color_plane;
+flat out uvec3 frag_color_origin;
+flat out uvec3 frag_color_dx;
+flat out uvec3 frag_color_dy;
+)
+#endif
 
 #if defined(FILTER_SABR) || defined(FILTER_XBR)
 STRINGIZE(
@@ -74,8 +84,28 @@ void main() {
    // Glium doesn't support 'normalized' for now
    /* Already in 0..1+ scale (1.0 == 0xFF). May exceed 1.0 when the PGXP
    // precise-colour path supplies the GTE's pre-saturation value. */
-   frag_shading_color = color;
-   frag_fog = fog;
+   frag_shading_color = uintBitsToFloat(color);
+   frag_fog = uintBitsToFloat(fog);
+)
+#if !defined(FILTER_SABR) && !defined(FILTER_XBR)
+STRINGIZE(
+   frag_native_color_plane = native_color_plane;
+   frag_color_origin = uvec3(0u);
+   frag_color_dx = uvec3(0u);
+   frag_color_dy = uvec3(0u);
+   if (native_color_plane != 0u) {
+      uvec3 low = uvec3(color.x, color.z, fog.y);
+      uvec3 high = uvec3(color.y, fog.x, fog.z);
+      frag_color_origin = low & 0xfffffu;
+      frag_color_dx = (low >> 20u) | ((high & 0xffu) << 12u);
+      frag_color_dy = high >> 8u;
+      frag_shading_color = vec3(uvec3(fog.w, fog.w >> 8u,
+            fog.w >> 16u) & 255u) / 255.0;
+      frag_fog = vec4(0.0);
+   }
+)
+#endif
+STRINGIZE(
 
    // Let OpenGL interpolate the texel position
    frag_texture_coord = vec2(texture_coord) + vec2(0.001, 0.001);
