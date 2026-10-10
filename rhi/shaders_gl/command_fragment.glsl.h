@@ -37,8 +37,8 @@ uniform uint dither_scaling;
 // The current render target stores native RGB5 channels. Quantize explicitly
 // so OpenGL's normalized conversion cannot round a feedback value to itself.
 uniform uint native_rgb5;
-// Reproduce the GPU's fixed-point texture modulation before attachment
-// conversion can round away a low-intensity framebuffer decrement.
+// Reproduce the GPU's fixed-point texture modulation when precise PGXP
+// colour is disabled.
 uniform uint fixed_point_modulation;
 // HDR fp16 target only. 0: saturate the modulated texture source to 1.0
 // before blending (hardware behaviour; the UNORM targets do this at the
@@ -1077,6 +1077,7 @@ void main() {
       else
       {
          vec4 texel;
+         bool native_modulation = false;
          bool hd_on = hd_enabled != 0U;
          vec4 texel0 = sample_texel(vec2(frag_texture_coord.x,
                   frag_texture_coord.y));
@@ -1118,6 +1119,7 @@ STRINGIZE(
 #else
 STRINGIZE(
          texel = texel0; //use nearest if nothing else is chosen
+         native_modulation = native_rgb5 != 0u && !hd_on;
 )
 #endif
 STRINGIZE(
@@ -1162,8 +1164,11 @@ STRINGIZE(
          if (frag_texture_blend_mode == BLEND_MODE_RAW_TEXTURE) {
             color = vec4(texel.rgb, mask_bit);
          } else /* BLEND_MODE_TEXTURE_BLEND */ {
+            /* Native nearest texels use the same integer colour levels as
+             * framebuffer feedback. Keep filtered and HD samples on their
+             * existing path so their additional precision is preserved. */
             if (fixed_point_modulation != 0u &&
-                frag_framebuffer_feedback != 0u)
+                (frag_framebuffer_feedback != 0u || native_modulation))
             {
                uint mod_x =
                   (uint(gl_FragCoord.x) / dither_scaling) & 3u;
