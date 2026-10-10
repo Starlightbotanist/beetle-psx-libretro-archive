@@ -95,14 +95,14 @@ ivec2 primitive_dither_coord()
 
 highp float primitive_dither_offset()
 {
-    return primitive_dither_enabled() ?
-        psx_dither_offset(uDitherLUT, primitive_dither_coord()) : 0.0;
+	return primitive_dither_enabled() ?
+		psx_dither_offset(uDitherLUT, primitive_dither_coord()) : 0.0;
 }
 
 highp vec3 quantize_native_rgb5(highp vec3 color, bool dither)
 {
-    float offset = dither ? primitive_dither_offset() : 0.0;
-    return psx_color5(color, offset) * (8.0 / 255.0);
+	float offset = dither ? primitive_dither_offset() : 0.0;
+	return psx_color5(color, offset) * (8.0 / 255.0);
 }
 
 #endif

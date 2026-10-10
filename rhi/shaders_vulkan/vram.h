@@ -40,11 +40,11 @@ vec2 clamp_coord(vec2 coord)
  * Vertex limits are enhancement clamps, not part of this integer path. */
 vec2 native_texture_coord()
 {
-    if ((uint(vParam.z) & 0x0008u) == 0u)
-        return clamp_coord(vUV);
-    uvec2 coord = uvec2(gl_FragCoord.xy);
-    uvec2 uv = vUVOrigin + coord.x * vUVDX + coord.y * vUVDY;
-    return vec2((uv >> 12u) & 255u);
+	if ((uint(vParam.z) & 0x0008u) == 0u)
+		return clamp_coord(vUV);
+	uvec2 coord = uvec2(gl_FragCoord.xy);
+	uvec2 uv = vUVOrigin + coord.x * vUVDX + coord.y * vUVDY;
+	return vec2((uv >> 12u) & 255u);
 }
 
 // Nearest neighbor

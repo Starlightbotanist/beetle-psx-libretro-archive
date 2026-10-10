@@ -10079,6 +10079,9 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
          VK_ACCESS_SHADER_READ_BIT);
 
+   /* Native colour/UV planes use gl_FragCoord as VRAM coordinates. Keep the
+    * zero-origin, full-framebuffer viewport set by begin_render_pass: the
+    * render area and scissors clip draws without rebasing pixel coordinates. */
    commandbuffer_begin_render_pass(cbh_get(&self->cmd), &info, VK_SUBPASS_CONTENTS_INLINE);
    commandbuffer_set_scissor(cbh_get(&self->cmd), &info.render_area);
    self->queue.default_scissor = info.render_area;
