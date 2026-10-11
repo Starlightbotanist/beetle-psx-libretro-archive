@@ -15,12 +15,13 @@
 #include <retro_miscellaneous.h>
 
 /* Determine whether to offset UVs to account for difference in interpolation between PS1 and modern GPUs */
-void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned count)
+bool Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned count)
 {
 	/* iCB: Just borrowing this from \parallel-psx\renderer\renderer.cpp */
 	uint16_t off_u = 0;
 	uint16_t off_v = 0;
 	bool may_be_2d = false;
+	bool adjusted = false;
 	if (gpu->InCmd == INCMD_QUAD)
 	{
 		off_u = gpu->off_u;
@@ -128,6 +129,9 @@ void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned cou
 				{
 					if (neg_dvdy)
 					{
+						int32_t original_v0 = vertices[0].v;
+						int32_t original_v1 = vertices[1].v;
+						int32_t original_v2 = vertices[2].v;
 						if (aby == -one)
 							vertices[0].v = vertices[1].v - 1;
 						else if (bcy == -one)
@@ -141,6 +145,8 @@ void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned cou
 							vertices[2].v = vertices[1].v - 1;
 						else if (cay == one)
 							vertices[0].v = vertices[2].v - 1;
+						adjusted = vertices[0].v != original_v0 ||
+							vertices[1].v != original_v1 || vertices[2].v != original_v2;
 					}
 				}
 			}
@@ -150,6 +156,7 @@ void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned cou
 	gpu->off_u = off_u;
 	gpu->off_v = off_v;
 	gpu->may_be_2d = may_be_2d;
+	return adjusted;
 }
 
 /* Reset min/max UVs for primitive */

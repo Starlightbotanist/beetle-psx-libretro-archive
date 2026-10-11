@@ -173,6 +173,8 @@ struct PS_GPU
    tri_vertex InQuad_F3Vertices[3];
    uint32_t InQuad_clut;
    bool InQuad_invalidW;
+   bool InQuad_split;
+   uint32_t InQuad_field_mask;
    uint32_t killQuadPart;	// bit flags for tris in quad that are to be culled
 
    // primitive UV offsets (used to correct flipped sprites)

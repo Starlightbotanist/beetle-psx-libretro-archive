@@ -504,6 +504,7 @@ static void Command_FBFill(PS_GPU* gpu, const uint32_t *cb)
    int32_t width             = (((cb[2] >> 0) & 0x3FF) + 0xF) & ~0xF;
    int32_t height            = (cb[2] >> 16) & 0x1FF;
    const bool sw             = rhi_intf_has_software_renderer();
+   int32_t fill_start = -1;
 
    gpu->DrawTimeAvail       -= 46; /* Approximate */
 
@@ -512,7 +513,17 @@ static void Command_FBFill(PS_GPU* gpu, const uint32_t *cb)
       const int32_t d_y = (y + destY) & 511;
 
       if(LineSkipTest(gpu, d_y))
+      {
+         if (fill_start >= 0)
+         {
+            rhi_intf_fill_rect(cb[0], destX, destY + fill_start,
+                  width, y - fill_start);
+            fill_start = -1;
+         }
          continue;
+      }
+      if (fill_start < 0)
+         fill_start = y;
 
       if (!DfeWouldSkip(gpu, d_y))
          gpu->DrawTimeAvail -= (width >> 3) + 9;
@@ -567,7 +578,11 @@ static void Command_FBFill(PS_GPU* gpu, const uint32_t *cb)
       }
    }
 
-   rhi_intf_fill_rect(cb[0], destX, destY, width, height);
+   /* Clears bypass the primitive shader. Preserve field exclusion in the
+    * submitted row ranges too; an ordinary fill remains one rectangle. */
+   if (fill_start >= 0)
+      rhi_intf_fill_rect(cb[0], destX, destY + fill_start,
+            width, height - fill_start);
 
    if (RectOverlapsDisplay(destX, destY, width, height))
       GPU.display_possibly_dirty = true;
@@ -1387,6 +1402,8 @@ void GPU_Power(void)
     * BSS contents. */
    GPU.InQuad_clut = 0;
    GPU.InQuad_invalidW = false;
+   GPU.InQuad_split = false;
+   GPU.InQuad_field_mask = 0;
    GPU.killQuadPart = 0;
    memset(GPU.InQuad_F3Vertices, 0, sizeof(GPU.InQuad_F3Vertices));
    memset(&GPU.InPLine_PrevPoint, 0, sizeof(GPU.InPLine_PrevPoint));
@@ -1568,6 +1585,12 @@ static void ProcessFIFO(uint32_t in_count)
       if(cc >= 0x20 && cc <= 0x3F && (cc & 0x4))
          SetTPage(&GPU, CB[4 + ((cc >> 4) & 0x1)] >> 16);
    }
+
+   /* Fill row ranges already apply field exclusion. Drawing primitives
+    * use the current GP1 mode/field and GP0 draw-to-display state. State
+    * changes retire queued draws before changing the shader mask. */
+   if (cc == 0x02 || (cc >= 0x20 && cc <= 0x7f))
+      rhi_intf_set_field_mask(cc == 0x02 ? 0 : GPUFieldMask(&GPU));
 
    if ((cc >= 0x80) && (cc <= 0x9F))
       Command_FBCopy(&GPU, CB);
@@ -2956,6 +2979,8 @@ int GPU_StateAction(StateMem *sm, int load, int data_only)
        * not portable across endianness regardless). */
       SFVARN(GPU.InQuad_clut, "InQuad_clut"),
       SFVARN(GPU.InQuad_invalidW, "InQuad_invalidW"),
+      SFVARN(GPU.InQuad_split, "InQuad_split"),
+      SFVARN(GPU.InQuad_field_mask, "InQuad_field_mask"),
       SFVARN(GPU.killQuadPart, "killQuadPart"),
 
       SFVARN(GPU.InQuad_F3Vertices[0].x, "InQuad_F3Vertices[0].x"),
@@ -3037,7 +3062,18 @@ int GPU_StateAction(StateMem *sm, int load, int data_only)
       SFEND
    };
 
-   int ret = MDFNSS_StateAction(sm, load, data_only, StateRegs, "GPU");
+   int ret;
+
+   if (load)
+   {
+      /* Older states deferred the first hardware quad half and have no
+       * split/field bookkeeping. Do not retain it from the abandoned run. */
+      GPU.InQuad_split = false;
+      GPU.InQuad_field_mask = ~0u;
+   }
+   ret = MDFNSS_StateAction(sm, load, data_only, StateRegs, "GPU");
+   if (load && GPU.InQuad_field_mask == ~0u)
+      GPU.InQuad_field_mask = GPUFieldMask(&GPU);
 
    GPU_RestoreStateP2(load);
 

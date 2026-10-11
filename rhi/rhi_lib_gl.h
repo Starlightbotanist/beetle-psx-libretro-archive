@@ -25,6 +25,11 @@ void rhi_gl_set_mask_setting(uint32_t mask_set_or, uint32_t mask_eval_and);
 
 void rhi_gl_invalidate_clut_cache(void);
 
+/* Primitive field mask: bit0 enables skipping, bit1 is skipped parity,
+ * bit2 bypasses skipping in the displayed 480 rows; bits3..11 are display Y.
+ * Derived afresh before each GPU draw command, including after restore. */
+void rhi_gl_set_field_mask(uint32_t mask);
+
 void rhi_gl_set_draw_offset(int16_t x, int16_t y);
 
 void rhi_gl_set_draw_area(uint16_t x0, uint16_t y0,
@@ -60,7 +65,7 @@ void rhi_gl_push_triangle(float p0x, float p0y, float p0w,
                           uint8_t depth_shift,
                           bool dither,
                           int blend_mode, //enum blending_modes
-                          bool mask_test, bool set_mask);
+                          bool mask_test, bool set_mask, uint16_t uv_offset_u, uint16_t uv_offset_v);
 
 void rhi_gl_push_quad(float p0x, float p0y, float p0w,
                       float p1x, float p1y, float p1w,

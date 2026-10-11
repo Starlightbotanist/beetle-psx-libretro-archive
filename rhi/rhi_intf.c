@@ -596,6 +596,20 @@ void rhi_intf_invalidate_clut_cache(void)
    }
 }
 
+void rhi_intf_set_field_mask(uint32_t mask)
+{
+   switch (rhi_type)
+   {
+#if defined(HAVE_OPENGL) || defined(HAVE_OPENGLES)
+      case RHI_OPENGL: rhi_gl_set_field_mask(mask); break;
+#endif
+#if defined(HAVE_VULKAN)
+      case RHI_VULKAN: rhi_vulkan_set_field_mask(mask); break;
+#endif
+      default: break;
+   }
+}
+
 void rhi_intf_set_draw_offset(int16_t x, int16_t y)
 {
 #ifdef RHI_DUMP
@@ -810,7 +824,7 @@ void rhi_intf_push_triangle(
       bool dither,
       int blend_mode,
       bool mask_test,
-      bool set_mask)
+      bool set_mask, uint16_t uv_offset_u, uint16_t uv_offset_v)
 {
 #ifdef RHI_DUMP
    const rhi_dump_vertex vertices[3] = {
@@ -841,7 +855,7 @@ void rhi_intf_push_triangle(
                texture_blend_mode,
                depth_shift,
                dither,
-               blend_mode, mask_test, set_mask);
+               blend_mode, mask_test, set_mask, uv_offset_u, uv_offset_v);
 #endif
          break;
       case RHI_VULKAN:
@@ -1061,6 +1075,23 @@ void rhi_intf_fill_rect(uint32_t color,
       uint16_t x, uint16_t y,
       uint16_t w, uint16_t h)
 {
+   uint16_t left, top;
+   if (!w || !h)
+      return;
+   x &= 1023;
+   y &= 511;
+   left = w < 1024 - x ? w : 1024 - x;
+   top = h < 512 - y ? h : 512 - y;
+   /* GP0 fills wrap in VRAM; each backend clear requires an in-bounds
+    * rectangle. Split here so field-selected row ranges wrap too. */
+   if (left != w || top != h)
+   {
+      rhi_intf_fill_rect(color, x, y, left, top);
+      rhi_intf_fill_rect(color, 0, y, w - left, top);
+      rhi_intf_fill_rect(color, x, 0, left, h - top);
+      rhi_intf_fill_rect(color, 0, 0, w - left, h - top);
+      return;
+   }
 #ifdef RHI_DUMP
    rhi_dump_fill_rect(color, x, y, w, h);
 #endif

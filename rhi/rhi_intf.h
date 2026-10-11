@@ -72,6 +72,11 @@ void rhi_intf_set_mask_setting(uint32_t mask_set_or, uint32_t mask_eval_and);
 /* GP0(01) clear cache and reset: the hardware renderers drop any retained
  * CLUT so the next 4/8bpp draw fetches its palette from VRAM again. */
 void rhi_intf_invalidate_clut_cache(void);
+/* Primitive field mask: bit0 enables skipping, bit1 is skipped parity,
+ * bit2 bypasses skipping in the displayed 480 rows; bits3..11 are display Y.
+ * Derived afresh before each GPU draw command, including after restore. */
+void rhi_intf_set_field_mask(uint32_t mask);
+
 void rhi_intf_set_draw_offset(int16_t x, int16_t y);
 void rhi_intf_set_draw_area(uint16_t x0, uint16_t y0,
                             uint16_t x1, uint16_t y1);
@@ -109,7 +114,8 @@ void rhi_intf_push_triangle(float p0x, float p0y, float p0w,
                              * FFI */
                             int blend_mode,
                             bool mask_test,
-                            bool set_mask);
+                            bool set_mask,
+                            uint16_t uv_offset_u, uint16_t uv_offset_v);
 
 /* Quad UVs include the decoder's floating-interpolation bias. Pass that
  * bias separately so native interpolation can recover the command UVs. */

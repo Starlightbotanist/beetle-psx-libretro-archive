@@ -25,6 +25,11 @@ void rhi_vulkan_set_tex_window(uint8_t tww, uint8_t twh,
 
 void rhi_vulkan_invalidate_clut_cache(void);
 
+/* Primitive field mask: bit0 enables skipping, bit1 is skipped parity,
+ * bit2 bypasses skipping in the displayed 480 rows; bits3..11 are display Y.
+ * Derived afresh before each GPU draw command, including after restore. */
+void rhi_vulkan_set_field_mask(uint32_t mask);
+
 void rhi_vulkan_set_draw_offset(int16_t x, int16_t y);
 
 void rhi_vulkan_set_draw_area(uint16_t x0, uint16_t y0,

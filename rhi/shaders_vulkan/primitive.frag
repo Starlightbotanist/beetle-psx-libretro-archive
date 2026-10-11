@@ -10,11 +10,6 @@ precision highp int;
 #include "primitive.h"
 
 layout(set = 0, binding = 4) uniform sampler2D uHighResTexture;
-layout(push_constant, std430) uniform Push
-{
-	ivec4 hd_texture_vram_rect; // The area of vram this hd texture covers
-	ivec4 hd_texture_texel_rect; // The area of this hd texture's own texels that may currently be used
-} push;
 #ifdef TEXTURED
 #include "hdtextures.h"
 
@@ -60,6 +55,9 @@ layout(location = 6) in highp vec4 vFog;
 
 void main()
 {
+	primitive_line_coverage();
+	if (primitive_skip_field())
+		discard;
 	float opacity = 1.0;
 	bool raw_texture = false;
 	/* True when the texel came from a replacement (HD) texture or a

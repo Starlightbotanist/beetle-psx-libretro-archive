@@ -984,6 +984,7 @@ struct gl_analog;
 struct gl_renderer {
    /* Buffer used to handle PlayStation GPU draw commands */
    gl_draw_buffer *command_buffer;
+   uint32_t field_mask;
    /* Buffer used to draw to the frontend's framebuffer */
    gl_draw_buffer *output_buffer;
    /* Buffer used to copy textures from 'fb_texture' to 'fb_out' */
@@ -3123,6 +3124,10 @@ static void gl_renderer_draw(gl_renderer *renderer)
    {
       glUseProgram(renderer->command_buffer->program->id);
       glUniform2i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "offset"), (GLint)x, (GLint)y);
+      glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms,
+               "field_mask"), renderer->field_mask);
+      glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms,
+               "field_scaling"), renderer->internal_upscaling);
       /* We use texture unit 0 */
       glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "fb_texture"), 0);
       /* HD replacement texture lives on unit 1 */
@@ -5647,7 +5652,7 @@ static void push_primitive(
       GLenum mode,
       gl_semi_transparency_mode stm,
       bool mask_test,
-      bool set_mask)
+      bool set_mask, uint16_t uv_offset_u, uint16_t uv_offset_v)
 {
    bool is_semi_transparent;
    bool is_textured;
@@ -5669,8 +5674,8 @@ static void push_primitive(
       HdTextureHandle hd = gl_tt_query_hd(renderer, v);
       if (colors && count == 3)
       {
-         gl_build_native_triangle_interpolants(renderer, v, colors, hd, 0, 0);
-         gl_vram_sync_primitive(renderer, v, count, 0, 0);
+         gl_build_native_triangle_interpolants(renderer, v, colors, hd, uv_offset_u, uv_offset_v);
+         gl_vram_sync_primitive(renderer, v, count, uv_offset_u, uv_offset_v);
       }
       vertex_preprocessing(renderer, v, count, mode, stm, mask_test, set_mask, hd);
    }
@@ -6928,6 +6933,19 @@ void rhi_gl_set_mask_setting(uint32_t mask_set_or, uint32_t mask_eval_and)
    (void)mask_eval_and;
 }
 
+void rhi_gl_set_field_mask(uint32_t mask)
+{
+   gl_renderer *renderer = static_renderer.state_data;
+   /* Pre-context geometry is dropped, and every later primitive supplies
+    * its own mask. There is no retained state to defer here. */
+   if (!renderer || static_renderer.state == GL_STATE_INVALID ||
+         renderer->field_mask == mask)
+      return;
+   if (!gl_draw_buffer_is_empty(renderer->command_buffer))
+      gl_renderer_draw(renderer);
+   renderer->field_mask = mask;
+}
+
 void rhi_gl_set_draw_offset(int16_t x, int16_t y)
 {
    gl_renderer *renderer;
@@ -7093,7 +7111,7 @@ void rhi_gl_push_triangle(
       uint8_t depth_shift,
       bool dither,
       int blend_mode,
-      bool mask_test, bool set_mask)
+      bool mask_test, bool set_mask, uint16_t uv_offset_u, uint16_t uv_offset_v)
 {
    gl_renderer *renderer;
    gl_semi_transparency_mode semi_transparency_mode    = SEMI_TRANSPARENCY_MODE_ADD;
@@ -7193,7 +7211,7 @@ void rhi_gl_push_triangle(
       {
          uint32_t colors[3] = {c0, c1, c2};
          push_primitive(renderer, v, 3, colors, GL_TRIANGLES,
-               semi_transparency_mode, mask_test, set_mask);
+               semi_transparency_mode, mask_test, set_mask, uv_offset_u, uv_offset_v);
       }
    }
 }
@@ -7582,7 +7600,7 @@ void rhi_gl_push_line(
             triangles[4] = quad[2];
             triangles[5] = quad[1];
             push_primitive(renderer, triangles, 6, NULL,
-                  GL_TRIANGLES, semi_transparency_mode, mask_test, set_mask);
+                  GL_TRIANGLES, semi_transparency_mode, mask_test, set_mask, 0, 0);
             return;
          }
       }
@@ -7601,14 +7619,14 @@ void rhi_gl_push_line(
          triangles[4] = quad[2];
          triangles[5] = quad[1];
          push_primitive(renderer, triangles, 6, NULL,
-               GL_TRIANGLES, semi_transparency_mode, mask_test, set_mask);
+               GL_TRIANGLES, semi_transparency_mode, mask_test, set_mask, 0, 0);
       }
       else
       {
          uint32_t colors[2] = {c0, c1};
          gl_vram_sync_primitive(renderer, v, 2, 0, 0);
          push_primitive(renderer, v, 2, colors,
-               GL_LINES, semi_transparency_mode, mask_test, set_mask);
+               GL_LINES, semi_transparency_mode, mask_test, set_mask, 0, 0);
       }
    }
 }

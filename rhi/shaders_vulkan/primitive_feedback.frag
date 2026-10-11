@@ -44,6 +44,9 @@ layout(location = 6) in highp vec4 vFog;
 
 void main()
 {
+	primitive_line_coverage();
+	if (primitive_skip_field())
+		discard;
 	bool raw_texture = false;
 	vec3 shade_color = primitive_color();
 	vec3 shaded;

@@ -37,6 +37,8 @@ uniform uint dither_scaling;
 // The current render target stores native RGB5 channels. Quantize explicitly
 // so OpenGL's normalized conversion cannot round a feedback value to itself.
 uniform uint native_rgb5;
+uniform highp uint field_mask;
+uniform highp uint field_scaling;
 // 1: compensate native averaging; 2: truncate quarter source.
 uniform uint native_blend;
 // Reproduce the GPU's fixed-point texture modulation when precise PGXP
@@ -1097,6 +1099,12 @@ vec4 get_texel_jinc2(out float opacity)
 #endif
 STRINGIZE(
 void main() {
+   uint native_y = uint(gl_FragCoord.y) / field_scaling;
+   if ((field_mask & 1u) != 0u &&
+         (native_y & 1u) == ((field_mask >> 1u) & 1u) &&
+         ((field_mask & 4u) == 0u ||
+          ((native_y - (field_mask >> 3u)) & 511u) >= 480u))
+      discard;
    frag_texture_coord = smooth_texture_coord;
 )
 #if !defined(FILTER_SABR) && !defined(FILTER_XBR)

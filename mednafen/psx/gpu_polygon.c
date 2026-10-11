@@ -864,7 +864,7 @@ static INLINE void PCT_UVBatch(int n, float bias,
 #endif
 
 #define DEFINE_DrawSpan(SUFFIX, GOURAUD_LIT, TEXTURED_LIT, BM_VAL, BM_TAG, TM_LIT, MO_LIT, ME_LIT) \
-static INLINE void DrawSpan_##SUFFIX(PS_GPU *gpu, int y, const int32_t x_start, const int32_t x_bound, i_group ig, const i_deltas *idl, const bool pct) \
+static INLINE void DrawSpan_##SUFFIX(PS_GPU *gpu, int y, const int32_t x_start, const int32_t x_bound, i_group ig, const i_deltas *idl, const bool pct, const bool rasterize) \
 { \
    int32_t clipx0; \
    int32_t clipx1; \
@@ -931,6 +931,23 @@ static INLINE void DrawSpan_##SUFFIX(PS_GPU *gpu, int y, const int32_t x_start, 
          gpu->DrawTimeAvail -= (w + ((w + 1) >> 1)) >> gpu->upscale_shift; \
       else \
          gpu->DrawTimeAvail -= w >> gpu->upscale_shift; \
+   } \
+   /* GPU busy time and texture-cache misses are observable even when \
+    * only a hardware renderer writes pixels. Walk UVs without shading \
+    * or framebuffer writes to preserve the software timing model. */ \
+   if (!rasterize) \
+   { \
+      if (TEXTURED_LIT) \
+      { \
+         do \
+         { \
+            GetTexel_TM##MO_LIT(gpu, ig.u >> (COORD_FBS + COORD_POST_PADDING), \
+                  ig.v >> (COORD_FBS + COORD_POST_PADDING)); \
+            ig.u += idl->du_dx; \
+            ig.v += idl->dv_dx; \
+         } while (--w > 0); \
+      } \
+      return; \
    } \
    /* Native-res, non-textured fast path: vectorise the contiguous run \
     * (the span lies within [ClipX0,ClipX1] in [0,1023], so it never \
@@ -1154,6 +1171,7 @@ static INLINE void DrawTriangle_##SUFFIX(PS_GPU *gpu, tri_vertex *vertices, cons
    int64_t bound_coord_ls; \
    bool right_facing; \
    bool pct_local = pct; \
+   const bool rasterize = rhi_intf_has_software_renderer(); \
    i_group ig; \
    unsigned vo = 0; \
    unsigned vp = 0; \
@@ -1326,7 +1344,7 @@ static INLINE void DrawTriangle_##SUFFIX(PS_GPU *gpu, tri_vertex *vertices, cons
                gpu->DrawTimeAvail -= 2; \
                continue; \
             } \
-            DrawSpan_g##GOURAUD_LIT##_t##TEXTURED_LIT##_##BM_TAG##_TM##TM_LIT##_MO##MO_LIT##_ME##ME_LIT(gpu, yi, GetPolyXFP_Int(lc), GetPolyXFP_Int(rc), ig, &idl, pct_local); \
+            DrawSpan_g##GOURAUD_LIT##_t##TEXTURED_LIT##_##BM_TAG##_TM##TM_LIT##_MO##MO_LIT##_ME##ME_LIT(gpu, yi, GetPolyXFP_Int(lc), GetPolyXFP_Int(rc), ig, &idl, pct_local, rasterize); \
          } \
       } \
       else \
@@ -1341,7 +1359,7 @@ static INLINE void DrawTriangle_##SUFFIX(PS_GPU *gpu, tri_vertex *vertices, cons
                gpu->DrawTimeAvail -= 2; \
                goto skipit_##SUFFIX; \
             } \
-            DrawSpan_g##GOURAUD_LIT##_t##TEXTURED_LIT##_##BM_TAG##_TM##TM_LIT##_MO##MO_LIT##_ME##ME_LIT(gpu, yi, GetPolyXFP_Int(lc), GetPolyXFP_Int(rc), ig, &idl, pct_local); \
+            DrawSpan_g##GOURAUD_LIT##_t##TEXTURED_LIT##_##BM_TAG##_TM##TM_LIT##_MO##MO_LIT##_ME##ME_LIT(gpu, yi, GetPolyXFP_Int(lc), GetPolyXFP_Int(rc), ig, &idl, pct_local, rasterize); \
             skipit_##SUFFIX: ; \
             yi++; \
             lc += ls; \
@@ -1395,7 +1413,7 @@ DRAWTRI_T1_BMGROUP(1, 1, 2)
  * gpu_polygon_sub.c.  Since gpu_polygon.c is now itself plain C
  * (textually included into gpu.c, also plain C as of stage 5),
  * these are simple C-linkage forward declarations. */
-void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned count);
+bool Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned count);
 void Reset_UVLimits(PS_GPU *gpu);
 void Extend_UVLimits(PS_GPU *gpu, tri_vertex *vertices, unsigned count);
 void Finalise_UVLimits(PS_GPU *gpu);
@@ -1444,6 +1462,49 @@ extern int psx_pgxp_2d_tol;
 #define POLYGON_DITHER_ENABLED(gpu, textured, modulated, gouraud) \
    (DitherEnabled(gpu) && ((textured) ? (modulated) : (gouraud)))
 
+/* A quad normally shares vertices between its two hardware triangles.
+ * An enhancement UV fixup can change those shared vertices independently;
+ * submit those exceptional halves separately, retaining each half's input. */
+static void GPU_PushTriangle(PS_GPU *gpu, tri_vertex *verts,
+      uint16_t clut_x, uint16_t clut_y, unsigned blend_mode,
+      unsigned texture_mode, bool dither, int bm, bool mask_eval,
+      bool quad)
+{
+   uint16_t off_u = quad ? gpu->off_u : 0;
+   uint16_t off_v = quad ? gpu->off_v : 0;
+   Reset_UVLimits(gpu);
+   Extend_UVLimits(gpu, verts, 3);
+   Finalise_UVLimits(gpu);
+   /* Push a single triangle */
+   rhi_intf_push_triangle(verts[0].precise[0],
+      verts[0].precise[1],
+      verts[0].precise[2],
+      verts[1].precise[0],
+      verts[1].precise[1],
+      verts[1].precise[2],
+      verts[2].precise[0],
+      verts[2].precise[1],
+      verts[2].precise[2],
+      ((uint32_t)verts[0].r) | ((uint32_t)verts[0].g << 8) | ((uint32_t)verts[0].b << 16),
+      ((uint32_t)verts[1].r) | ((uint32_t)verts[1].g << 8) | ((uint32_t)verts[1].b << 16),
+      ((uint32_t)verts[2].r) | ((uint32_t)verts[2].g << 8) | ((uint32_t)verts[2].b << 16),
+      gpu_precise_tri_rgb(verts),
+      gpu_precise_tri_fog(verts),
+      verts[0].u + off_u, verts[0].v + off_v,
+      verts[1].u + off_u, verts[1].v + off_v,
+      verts[2].u + off_u, verts[2].v + off_v,
+      gpu->min_u, gpu->min_v,
+      gpu->max_u, gpu->max_v,
+      gpu->TexPageX, gpu->TexPageY,
+      clut_x, clut_y,
+      blend_mode,
+      2 - (texture_mode),
+      dither,
+      (bm),
+      (mask_eval),
+      gpu->MaskSetOR != 0, off_u, off_v);
+}
+
 #define DEFINE_Command_DrawPolygon(SUFFIX, NV_LIT, GOURAUD_LIT, TEXTURED_LIT, BM_VAL, BM_TAG, TM_LIT, MO_LIT, ME_LIT, PGXP_LIT) \
 static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
 { \
@@ -1457,6 +1518,7 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
    uint16_t       clut_x, clut_y; \
    tri_vertex     lineVertices[3]; \
    bool           lineFound = false; \
+   bool           uv_adjusted = false; \
    /*uint32_t tpage = 0;*/ \
    vertices[0].x          = 0; \
    vertices[0].y          = 0; \
@@ -1655,11 +1717,28 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
    /* Calculated UV offsets (needed for hardware renderers and software with scaling) */ \
    /* Do one time updates for primitive */ \
    if (TEXTURED_LIT) \
-      Calc_UVOffsets_Adjust_Verts(gpu, vertices, NV_LIT); \
+      uv_adjusted = Calc_UVOffsets_Adjust_Verts(gpu, vertices, NV_LIT); \
    if (NV_LIT == 4) \
    { \
       if (gpu->InCmd == INCMD_QUAD) \
       { \
+         if (!gpu->InQuad_split && (uv_adjusted || \
+               gpu->InQuad_field_mask != GPUFieldMask(gpu))) \
+         { \
+            if ((gpu->killQuadPart & 1) == 0 && \
+                  rhi_intf_is_type() != RHI_SOFTWARE) \
+            { \
+               unsigned mode = TEXTURED_LIT ? \
+                     (TM_LIT ? BLEND_MODE_SUBTRACT : BLEND_MODE_ADD) : BLEND_MODE_AVERAGE; \
+               rhi_intf_set_field_mask(gpu->InQuad_field_mask); \
+               GPU_PushTriangle(gpu, gpu->InQuad_F3Vertices, clut & (0x3f << 4), \
+                     (clut >> 10) & 0x1ff, mode, MO_LIT, \
+                     POLYGON_DITHER_ENABLED(gpu, TEXTURED_LIT, TM_LIT, GOURAUD_LIT), \
+                     BM_VAL, ME_LIT, true); \
+               rhi_intf_set_field_mask(GPUFieldMask(gpu)); \
+            } \
+            gpu->InQuad_split = true; \
+         } \
          gpu->InCmd = INCMD_NONE; \
          if (invalidW) \
          { \
@@ -1681,6 +1760,8 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
       } \
       else \
       { \
+         gpu->InQuad_split = uv_adjusted || GPUFieldMask(gpu) != 0; \
+         gpu->InQuad_field_mask = GPUFieldMask(gpu); \
          gpu->InCmd = INCMD_QUAD; \
          gpu->InCmd_CC = cb0 >> 24; \
          memcpy(&gpu->InQuad_F3Vertices[0], &vertices[0], sizeof(tri_vertex)); \
@@ -1695,8 +1776,12 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
       if (NV_LIT == 4) \
          gpu->killQuadPart |= (gpu->InCmd == INCMD_QUAD) ? 1 : 2; \
       /* hardware renderer still needs to render first triangle */ \
-      if ((rhi_intf_is_type() == RHI_SOFTWARE) || (gpu->killQuadPart != 2)) \
+      if ((rhi_intf_is_type() == RHI_SOFTWARE) || gpu->InQuad_split || (gpu->killQuadPart != 2)) \
+      { \
+         if (NV_LIT == 4 && gpu->InQuad_split && gpu->InCmd == INCMD_NONE) \
+            gpu->killQuadPart = 0; \
          return; \
+      } \
    } \
    if (abs(vertices[2].x - vertices[0].x) >= (1024 << gpu->upscale_shift) || \
        abs(vertices[2].x - vertices[1].x) >= (1024 << gpu->upscale_shift) || \
@@ -1705,8 +1790,12 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
       if (NV_LIT == 4) \
          gpu->killQuadPart |= (gpu->InCmd == INCMD_QUAD) ? 1 : 2; \
       /* hardware renderer still needs to render first triangle */ \
-      if ((rhi_intf_is_type() == RHI_SOFTWARE) || (gpu->killQuadPart != 2)) \
+      if ((rhi_intf_is_type() == RHI_SOFTWARE) || gpu->InQuad_split || (gpu->killQuadPart != 2)) \
+      { \
+         if (NV_LIT == 4 && gpu->InQuad_split && gpu->InCmd == INCMD_NONE) \
+            gpu->killQuadPart = 0; \
          return; \
+      } \
    } \
    clut_x = (clut & (0x3f << 4)); \
    clut_y = (clut >> 10) & 0x1ff; \
@@ -1737,7 +1826,7 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
       if (rhi_intf_is_type() == RHI_OPENGL || rhi_intf_is_type() == RHI_VULKAN) \
       { \
          Reset_UVLimits(gpu); \
-         if ((NV_LIT == 4) && (!gpu->killQuadPart)) \
+         if ((NV_LIT == 4) && (!gpu->killQuadPart) && !gpu->InQuad_split) \
          { \
             if (gpu->InCmd == INCMD_NONE) \
             { \
@@ -1790,36 +1879,9 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
                verts = &gpu->InQuad_F3Vertices[0]; \
             else \
                verts = &vertices[0]; \
-            Extend_UVLimits(gpu, verts, 3); \
-            Finalise_UVLimits(gpu); \
-            /* Push a single triangle */ \
-            rhi_intf_push_triangle(verts[0].precise[0], \
-               verts[0].precise[1], \
-               verts[0].precise[2], \
-               verts[1].precise[0], \
-               verts[1].precise[1], \
-               verts[1].precise[2], \
-               verts[2].precise[0], \
-               verts[2].precise[1], \
-               verts[2].precise[2], \
-               ((uint32_t)verts[0].r) | ((uint32_t)verts[0].g << 8) | ((uint32_t)verts[0].b << 16), \
-               ((uint32_t)verts[1].r) | ((uint32_t)verts[1].g << 8) | ((uint32_t)verts[1].b << 16), \
-               ((uint32_t)verts[2].r) | ((uint32_t)verts[2].g << 8) | ((uint32_t)verts[2].b << 16), \
-               gpu_precise_tri_rgb(verts), \
-               gpu_precise_tri_fog(verts), \
-               verts[0].u, verts[0].v, \
-               verts[1].u, verts[1].v, \
-               verts[2].u, verts[2].v, \
-               gpu->min_u, gpu->min_v, \
-               gpu->max_u, gpu->max_v, \
-               gpu->TexPageX, gpu->TexPageY, \
-               clut_x, clut_y, \
-               blend_mode, \
-               2 - (MO_LIT), \
-               POLYGON_DITHER_ENABLED(gpu, TEXTURED_LIT, TM_LIT, GOURAUD_LIT), \
-               (BM_VAL), \
-               (ME_LIT), \
-               gpu->MaskSetOR != 0); \
+            GPU_PushTriangle(gpu, verts, clut_x, clut_y, blend_mode, MO_LIT, \
+                  POLYGON_DITHER_ENABLED(gpu, TEXTURED_LIT, TM_LIT, GOURAUD_LIT), \
+                  BM_VAL, ME_LIT, NV_LIT == 4); \
             if (gpu->killQuadPart == 2) \
             { \
                gpu->killQuadPart = 0; \
@@ -1840,7 +1902,6 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
             } \
          } \
       } \
-      if (rhi_intf_has_software_renderer()) \
       { \
          /* Perspective-correct texturing for the SW rasteriser. \
           * Eligible when this primitive came in through the PGXP \
@@ -1851,7 +1912,7 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
           * "PGXP Perspective Correct Texturing" core option. \
           * With PGXP_LIT or TEXTURED_LIT 0 at compile time the \
           * whole expression folds to false. */ \
-         bool pct = (PGXP_LIT) && (TEXTURED_LIT) \
+         bool pct = rhi_intf_has_software_renderer() && (PGXP_LIT) && (TEXTURED_LIT) \
                     && !invalidW \
                     && PGXP_texture_correction_enabled(); \
          DrawTriangle_g##GOURAUD_LIT##_t##TEXTURED_LIT##_##BM_TAG##_TM##TM_LIT##_MO##MO_LIT##_ME##ME_LIT(gpu, vertices, pct); \

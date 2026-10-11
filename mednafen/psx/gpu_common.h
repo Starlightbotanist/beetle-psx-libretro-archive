@@ -468,6 +468,15 @@ static INLINE bool DfeWouldSkip(PS_GPU *g, unsigned y)
    return (y & 1) == ((g->DisplayFB_YStart + g->field_ram_readout) & 1);
 }
 
+static INLINE uint32_t GPUFieldMask(const PS_GPU *g)
+{
+   if ((g->DisplayMode & 0x24) != 0x24 || g->dfe)
+      return 0;
+   return 1u | (((g->DisplayFB_YStart + g->field_ram_readout) & 1u) << 1) |
+         (psx_gpu_rasterize_both_fields ?
+          4u | ((g->DisplayFB_YStart & 511u) << 3) : 0u);
+}
+
 static INLINE bool LineSkipTest(PS_GPU* g, unsigned y)
 {
    if((g->DisplayMode & 0x24) != 0x24)

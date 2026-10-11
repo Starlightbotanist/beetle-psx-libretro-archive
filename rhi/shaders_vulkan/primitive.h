@@ -11,6 +11,7 @@ layout(location = 2) flat in mediump ivec3 vParam;
 layout(location = 7) flat in highp uvec3 vColorOrigin;
 layout(location = 8) flat in highp uvec3 vColorDX;
 layout(location = 9) flat in highp uvec3 vColorDY;
+layout(location = 13) flat in highp uvec2 vLine;
 #if !defined(UNSCALED)
 layout(constant_id = 3) const int SCALE = 1;
 #endif
@@ -18,6 +19,26 @@ layout(constant_id = 3) const int SCALE = 1;
      #include "vram.h"
 #endif
 layout(location = 0) out vec4 FragColor;
+layout(push_constant, std430) uniform Push
+{
+	ivec4 hd_texture_vram_rect;
+	ivec4 hd_texture_texel_rect;
+	uint field_mask;
+} push;
+
+bool primitive_skip_field()
+{
+	uint y = uint(gl_FragCoord.y);
+#ifndef UNSCALED
+	y /= uint(SCALE);
+#endif
+	/* GP0 draw-to-display controls field exclusion in 480i. Deinterlacer
+	 * Off bypasses it only inside the wrapped displayed 480-row range. */
+	return (push.field_mask & 1u) != 0u &&
+		(y & 1u) == ((push.field_mask >> 1u) & 1u) &&
+		((push.field_mask & 4u) == 0u ||
+		 ((y - (push.field_mask >> 3u)) & 511u) >= 480u);
+}
 layout(set = 0, binding = 2) uniform sampler2D uDitherLUT;
 layout(constant_id = 10) const int FRAMEBUFFER_FLOAT16 = 0;
 
@@ -63,6 +84,36 @@ highp vec3 framebuffer_feedback_texel5(highp vec3 color)
 bool primitive_native_color()
 {
 	return (uint(vParam.z) & PARAM_NATIVE_COLOR) != 0u;
+}
+
+void primitive_line_coverage()
+{
+   if ((uint(vParam.z) & 0x0010u) != 0u)
+   {
+      ivec2 first = ivec2(int(vLine.x << 16u) >> 16, int(vLine.x) >> 16);
+      ivec2 delta = ivec2(int(vLine.y << 16u) >> 16, int(vLine.y) >> 16);
+      ivec2 coord = ivec2(gl_FragCoord.xy);
+#ifndef UNSCALED
+      coord /= SCALE;
+#endif
+      int steps = max(abs(delta.x), abs(delta.y));
+      bool horizontal = abs(delta.x) > abs(delta.y);
+      int major = horizontal ? coord.x - first.x : coord.y - first.y;
+      int direction = horizontal ? delta.x : delta.y;
+      int k = direction < 0 ? -major : major;
+      if (k < 0 || k > steps)
+         discard;
+      int minor = horizontal ? first.y : first.x;
+      if (steps != 0)
+      {
+         int d = horizontal ? delta.y : delta.x;
+         int n = 2 * d * k + steps - ((!horizontal || d < 0) ? 1 : 0);
+         int divisor = 2 * steps;
+         minor += (n - (n < 0 ? divisor - 1 : 0)) / divisor;
+      }
+      if ((horizontal ? coord.y : coord.x) != minor)
+         discard;
+   }
 }
 
 highp vec3 primitive_color()

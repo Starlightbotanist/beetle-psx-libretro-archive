@@ -191,6 +191,7 @@ static INLINE int DrawSpriteFillVec(PS_GPU *gpu, int32_t x, int32_t y,
 static void DrawSprite_##SUFFIX(PS_GPU *gpu, int32_t x_arg, int32_t y_arg, int32_t w, int32_t h, \
       uint8_t u_arg, uint8_t v_arg, uint32_t color, uint32_t clut_offset) \
 { \
+   const bool rasterize = rhi_intf_has_software_renderer(); \
    uint8_t  u = 0, v = 0; \
    const int32_t r          = color & 0xFF; \
    const int32_t g          = (color >> 8) & 0xFF; \
@@ -261,18 +262,31 @@ static void DrawSprite_##SUFFIX(PS_GPU *gpu, int32_t x_arg, int32_t y_arg, int32
          /* Native-res flat-fill fast path.  Textured sprites and any \
           * upscale stay scalar; the run is within [ClipX0,ClipX1] so \
           * it never crosses the x==1024 VRAM wrap. */ \
-         if (!(T_LIT) && gpu->upscale_shift == 0) \
+         if (rasterize && !(T_LIT) && gpu->upscale_shift == 0) \
          { \
             int _vn = DrawSpriteFillVec(gpu, x_start, y, x_bound - x_start, \
                   fill_color, (BM_VAL), (ME_LIT)); \
             x = x_start + _vn; \
          } \
-         for (; MDFN_LIKELY(x < x_bound); x++) \
+         /* Timing-only sprites step U by one texel. Repeated accesses \
+          * within the same four-word cache line cannot add misses. */ \
+         if (!rasterize && (T_LIT)) \
+            while (x < x_bound) \
+            { \
+               uint32_t offset = u_r & ((1u << (4 - MO_LIT)) - 1u); \
+               uint32_t run = u_inc < 0 ? offset + 1 : (1u << (4 - MO_LIT)) - offset; \
+               if (run > (uint32_t)(x_bound - x)) \
+                  run = x_bound - x; \
+               GetTexel_TM##MO_LIT(gpu, u_r, v); \
+               u_r += u_inc * run; \
+               x += run; \
+            } \
+         for (; rasterize && MDFN_LIKELY(x < x_bound); x++) \
          { \
             if (T_LIT) \
             { \
                uint16_t fbw = GetTexel_TM##MO_LIT(gpu, u_r, v); \
-               if (fbw) \
+               if (rasterize && fbw) \
                { \
                   if (TM_LIT) \
                   { \
@@ -536,8 +550,6 @@ static void Command_DrawSprite_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
    x = sign_x_to_s32(11, x + gpu->OffsX); \
    y = sign_x_to_s32(11, y + gpu->OffsY); \
    GPU_SPR_RHI_PUSH_HOOK(gpu, x, y, w, h, u, v, color, clut, T_LIT, TM_LIT, MO_LIT, BM_VAL, ME_LIT); \
-   if (!rhi_intf_has_software_renderer()) \
-      return; \
    SPR_DISPATCH_DRAW(TM_LIT, BM_TAG, MO_LIT, ME_LIT, T_LIT) \
 }
 

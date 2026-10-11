@@ -5913,6 +5913,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
          Device *device;
          unsigned scaling;
          unsigned msaa;
+         uint32_t field_mask;
          /* Cached, device-probed format for the HDR scanout image (lazily
           * filled on first HDR frame). VK_FORMAT_UNDEFINED = not yet probed. */
          VkFormat hdr_scanout_format;
@@ -9552,6 +9553,21 @@ static void renderer_draw_line(Renderer *self, const Vertex *vertices)
     * games render. */
    Vertex vert[4];
    renderer_build_line_quad(self, vert, vertices);
+   if (self->render_state.native_color && self->scaling == 1 &&
+       self->msaa == 1 && psx_pgxp_mode == 0)
+   {
+      float dx = vertices[1].x - vertices[0].x;
+      float dy = vertices[1].y - vertices[0].y;
+      unsigned i, axis = fabsf(dx) > fabsf(dy) ? 1 : 0;
+      if (dx != 0.0f || dy != 0.0f)
+         for (i = 0; i < 4; i++)
+         {
+            if (axis)
+               vert[i].y += (i & 1) ? 1.0f : -1.0f;
+            else
+               vert[i].x += (i & 1) ? 1.0f : -1.0f;
+         }
+   }
    renderer_draw_quad(self, vert, false, vertices);
 }
 
@@ -9573,9 +9589,9 @@ static void renderer_set_native_color_plane(BufferVertex *output,
 /* Lines advance colour once per dominant-axis pixel, including the endpoint.
  * Derive from the original GP0 endpoints, not the expanded drawing quad: its
  * extra endpoint pixel must not stretch the colour gradient. The existing
- * line coverage remains independent of this colour accumulator. Unlike GL's
- * eligible native line path, Vulkan does not apply an exact DDA pixel mask;
- * both native and enhanced lines retain the existing expanded-quad coverage. */
+ * line coverage remains independent of this colour accumulator. Native 1x,
+ * single-sample, non-PGXP RGB5 lines now use the exact DDA pixel mask;
+ * enhanced lines retain their existing expanded-quad coverage. */
 static void renderer_build_native_line_colors(Renderer *self,
       BufferVertex *output, const Vertex *vertices)
 {
@@ -9767,7 +9783,31 @@ static void renderer_draw_quad(Renderer *self, const Vertex *vertices, bool poly
    vert[4] = vert[2];
    vert[3] = vert[1];
    if (line_vertices)
+   {
       renderer_build_native_line_colors(self, vert, line_vertices);
+      if (self->render_state.native_color && self->scaling == 1 &&
+          self->msaa == 1 && psx_pgxp_mode == 0)
+      {
+         int32_t x[2], y[2];
+         uint32_t first, delta;
+         unsigned i, anchor;
+         for (i = 0; i < 2; i++)
+         {
+            x[i] = (int32_t)(line_vertices[i].x + self->render_state.draw_offset_x);
+            y[i] = (int32_t)(line_vertices[i].y + self->render_state.draw_offset_y);
+         }
+         anchor = x[0] > x[1] ? 1 : 0;
+         first = (uint16_t)x[anchor] | ((uint32_t)(uint16_t)y[anchor] << 16);
+         delta = (uint16_t)(x[1 - anchor] - x[anchor]) |
+               ((uint32_t)(uint16_t)(y[1 - anchor] - y[anchor]) << 16);
+         for (i = 0; i < 6; i++)
+         {
+            vert[i].params = (int16_t)((uint16_t)vert[i].params | 0x0010u);
+            memcpy(&vert[i].w, &delta, sizeof(delta));
+            memcpy(vert[i].fog + 3, &first, sizeof(first));
+         }
+      }
+   }
    else if (polygon)
    {
       renderer_build_native_interpolants(self, vert, vertices);
@@ -10269,13 +10309,15 @@ static void renderer_hd_texture_uniforms(Renderer *self,
       int32_t texel_rect_y;
       int32_t texel_rect_width;
       int32_t texel_rect_height;
+      uint32_t field_mask;
    };
    HdTexture hd = texture_tracker_get_hd_texture(self->tracker, hd_texture_index);
    Image *hd_img = (Image *)hd.texture; /* the Vulkan TTGpuBackend hands out Image* */
    commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 4, image_get_view(hd_img), StockSampler_TrilinearClamp); /* Type of sampler only matters for the fast path */
    { struct HDPush push = {
       hd.vram_rect.x, hd.vram_rect.y, hd.vram_rect.width, hd.vram_rect.height,
-      hd.texel_rect.x, hd.texel_rect.y, hd.texel_rect.width, hd.texel_rect.height
+      hd.texel_rect.x, hd.texel_rect.y, hd.texel_rect.width, hd.texel_rect.height,
+      self->field_mask
    };
    commandbuffer_push_constants(cbh_get(&self->cmd), &push, 0, sizeof(push)); }
    /* get_hd_texture returns an OWNED (+1) reference in hd.texture (every path now
@@ -21067,6 +21109,16 @@ void rhi_vulkan_set_draw_offset(int16_t x, int16_t y)
    }
    else
       rhi_defer_push_set_draw_offset(&defer, x, y);
+}
+
+void rhi_vulkan_set_field_mask(uint32_t mask)
+{
+   /* As with pre-context geometry, this derived per-command value does
+    * not need deferral: the next primitive always supplies it again. */
+   if (!renderer || renderer->field_mask == mask)
+      return;
+   fbatlas_flush_render_pass(&renderer->atlas);
+   renderer->field_mask = mask;
 }
 
 void rhi_vulkan_set_draw_area(uint16_t x0, uint16_t y0,
