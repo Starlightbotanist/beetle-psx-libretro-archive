@@ -17,8 +17,8 @@
 #endif
 
 static const char * command_fragment_name_ = GLSL_FRAGMENT(
-uniform sampler2D fb_texture;
-uniform sampler2D palette_texture;
+uniform highp sampler2D fb_texture;
+uniform highp sampler2D palette_texture;
 )
 #ifdef HAVE_OPENGLES3
 STRINGIZE(
@@ -37,6 +37,10 @@ uniform uint dither_scaling;
 // The current render target stores native RGB5 channels. Quantize explicitly
 // so OpenGL's normalized conversion cannot round a feedback value to itself.
 uniform uint native_rgb5;
+uniform uint unexpanded_storage;
+uniform highp sampler2D blend_texture;
+// 0: fixed-function; 1: average; 2: add; 3: subtract; 4: quarter-add.
+uniform uint color_blend;
 // 1: compensate native averaging; 2: truncate quarter source.
 uniform uint native_blend;
 // Reproduce the GPU's fixed-point texture modulation when precise PGXP
@@ -58,18 +62,17 @@ uniform uint pgxp_fog;
 // equation MAX against zero restores the hardware floor).
 uniform uint force_zero;
 
-// When 1, emit vec4(1.0) AFTER the discards below: the ceiling pass that
-// precedes each subtractive draw on the fp16 target (blend equation MIN
-// clamps the destination to white exactly where the subtraction lands;
-// the hardware saturated every blend at white).
-uniform uint force_one;
+// Positive values select a ceiling-only draw after the normal coverage
+// discards. HDR subtraction clamps its destination to1; enhanced16 additive
+// batches clamp at248/255. Alpha and stencil are preserved by the host.
+uniform float force_ceiling;
 
 // 0: Only draw opaque pixels, 1: only draw semi-transparent pixels
 uniform uint draw_semi_transparent;
 
 // ---- HD texture replacement (shared rhi_tt texture tracker) ----
 // Per-batch state set by gl_renderer_draw. hd_texture lives on unit 1.
-uniform sampler2D hd_texture;
+uniform highp sampler2D hd_texture;
 // 0: no replacement bound for this batch
 uniform uint hd_enabled;
 // The area of vram this hd texture covers (x, y, w, h)
@@ -166,9 +169,14 @@ vec4 vram_get_pixel(uint x, uint y) {
   x = (x & 0x3ffU);
   y = (y & 0x1ffU);
 
-  if (frag_framebuffer_feedback != 0U && feedback_upscaling > 1U)
-     return texelFetch(fb_feedback_texture,
+  if (frag_framebuffer_feedback != 0U && feedback_upscaling > 1U) {
+     vec4 color = texelFetch(fb_feedback_texture,
            ivec2(x, y) * int(feedback_upscaling), 0);
+     if (unexpanded_storage != 0u)
+        color.rgb = clamp(floor(color.rgb * (255.0 / 8.0) +
+              vec3(0.001)), vec3(0.0), vec3(31.0)) / 31.0;
+     return color;
+  }
 
   return texelFetch(fb_texture, ivec2(x, y), 0);
 }
@@ -417,6 +425,9 @@ STRINGIZE(
             fract(feedback_phase);
       texel = texelFetch(fb_feedback_texture,
             ivec2(feedback_coord * float(feedback_upscaling)), 0);
+      if (unexpanded_storage != 0u)
+         texel.rgb = clamp(floor(texel.rgb * (255.0 / 8.0) +
+               vec3(0.001)), vec3(0.0), vec3(31.0)) / 31.0;
    }
    else
       texel = vram_get_pixel(tex_x_pix, tex_y);
@@ -457,6 +468,11 @@ STRINGIZE(
          texel = vram_get_pixel(frag_clut.x + index, frag_clut.y);
    }
 
+   // RGB5 texture sampling may use bit replication. Recover the exact
+   // normalized level before filtering or modulation, rather than letting
+   // that conversion error choose the neighboring source code.
+   if (native_rgb5 != 0u || unexpanded_storage != 0u)
+      texel.rgb = floor(texel.rgb * 31.0 + vec3(0.5)) / 31.0;
 )
 #ifdef HAVE_OPENGLES3
 STRINGIZE(
@@ -1147,6 +1163,8 @@ STRINGIZE(
 
    vec4 color;
    bool modulation_quantized = false;
+   bool enhanced_texel = false;
+   bool hd_texel = false;
    float opacity=1.;
    
       if (frag_texture_blend_mode == BLEND_MODE_NO_TEXTURE)
@@ -1171,10 +1189,16 @@ STRINGIZE(
             vec4 hd_nn;
             if (hd_sample_nearest_sd(frag_texture_coord.xy, hd_nn)) {
                texel0 = hd_nn;
+               hd_texel = true;
                opacity = (hd_nn != vec4(0.0)) ? 1.0 : 0.0;
             }
          }
 )
+#if defined(FILTER_SABR) || defined(FILTER_XBR) || defined(FILTER_BILINEAR) || defined(FILTER_3POINT) || defined(FILTER_JINC2)
+STRINGIZE(
+         hd_texel = false;
+)
+#endif
 #if defined(FILTER_SABR)
 STRINGIZE(
 		texel = get_texel_sabr();
@@ -1214,9 +1238,18 @@ STRINGIZE(
                texel.rgb = hd_color.rgb;
                texel.a = texel0.a;
                opacity = hd_color.a;
+               hd_texel = true;
             }
          }
 
+         enhanced_texel = hd_texel;
+)
+#if defined(FILTER_SABR) || defined(FILTER_XBR) || defined(FILTER_BILINEAR) || defined(FILTER_3POINT) || defined(FILTER_JINC2)
+STRINGIZE(
+         enhanced_texel = true;
+)
+#endif
+STRINGIZE(
 	 // texel color 0x0000 is always fully transparent (even for opaque
          // draw commands)
       //   if (is_transparent(texel0)) {
@@ -1244,6 +1277,16 @@ STRINGIZE(
 
          if (frag_texture_blend_mode == BLEND_MODE_RAW_TEXTURE) {
             color = vec4(texel.rgb, mask_bit);
+            if (native_rgb5 != 0u) {
+               if (!enhanced_texel) {
+                  vec3 q5 = floor(texel.rgb * 31.0 + vec3(0.5));
+                  color.rgb = unexpanded_storage != 0u ?
+                        q5 * (8.0 / 255.0) : q5 / 31.0;
+                  modulation_quantized = true;
+               } else if (!hd_texel || unexpanded_storage != 0u)
+                  color.rgb *= 248.0 / 255.0;
+            } else if (unexpanded_storage != 0u && !hd_texel)
+               color.rgb *= 248.0 / 255.0;
          } else /* BLEND_MODE_TEXTURE_BLEND */ {
             /* Native nearest texels use the same integer colour levels as
              * framebuffer feedback. Keep filtered and HD samples on their
@@ -1266,16 +1309,24 @@ STRINGIZE(
                 * shading colour to an intermediate fixed-point value.  Its
                 * DitherLUT then adds the 4x4 offset, divides by eight with
                 * truncation, and clamps the result to a 5-bit channel. */
-               color = vec4(clamp(floor((modulated + mod_dither) / 8.),
-                                  vec3(0.), vec3(31.)) / 31., mask_bit);
+               vec3 q5 = clamp(floor((modulated + mod_dither) / 8.),
+                                  vec3(0.), vec3(31.));
+               color = vec4(unexpanded_storage != 0u ?
+                     q5 * (8.0 / 255.0) : q5 / 31.0, mask_bit);
                modulation_quantized = true;
             }
             else
             {
-               // Blend the texel with the shading color. The shading color
-               // is multiplied by two so that it can darken or lighten the
-               // texture as needed.
-               color = vec4(pgxp_shading() * 2. * texel.rgb, mask_bit);
+               // GP0 shade 128 is neutral. SDR uses byte-domain VRAM
+               // levels (q*8), including in 32 bpp; HD images already carry
+               // byte colors. Active HDR keeps its existing wide path.
+               if (native_rgb5 != 0u || unexpanded_storage != 0u) {
+                  vec3 source = texel.rgb;
+                  if (!hd_texel || (native_rgb5 != 0u && unexpanded_storage != 0u))
+                     source *= 248.0 / 255.0;
+                  color = vec4(pgxp_shading() * (255.0 / 128.0) * source, mask_bit);
+               } else
+                  color = vec4(pgxp_shading() * 2. * texel.rgb, mask_bit);
             }
          }
 
@@ -1284,12 +1335,14 @@ STRINGIZE(
          // ("I think OpenGL will take care of that"), which GL_RGBA16F
          // does not do. No-op on the UNORM targets; hdr_hot skips it for
          // over-white additive sources on the fp16 target.
-         if (hdr_hot == 0u)
+         // SDR saturation follows source dithering below. Clamping a hot
+         // source first would darken saturated pixels at negative dither taps.
+         if (hdr_hot == 0u && native_rgb5 == 0u && unexpanded_storage == 0u)
             color.rgb = min(color.rgb, vec3(1.));
       }
 
-   if (force_one != 0u) {
-      frag_color = vec4(1.);
+   if (force_ceiling > 0.0) {
+      frag_color = vec4(vec3(force_ceiling), 1.0);
       return;
    }
 
@@ -1318,20 +1371,49 @@ STRINGIZE(
        * conversion and can turn a channel into n - 1. Let the RGB5
        * attachment round it back to the same hardware value instead. */
       if (native_rgb5 != 0u &&
-          frag_texture_blend_mode == BLEND_MODE_NO_TEXTURE)
+          (!enhanced_texel || unexpanded_storage == 0u))
       {
-         /* Untextured shading is an 8-bit color. Dither before reducing
-          * groups of eight to the hardware's 5-bit channel values. */
-         vec3 color8 = color.rgb * 255. + vec3(float(dither_offset));
-         output_rgb = clamp(floor((color8 + vec3(0.001)) / 8.),
-                            vec3(0.), vec3(31.)) / 31.;
+         vec3 q5 = clamp(floor((color.rgb * 255.0 +
+               vec3(float(dither_offset)) + vec3(0.001)) / 8.0),
+               vec3(0.0), vec3(31.0));
+         output_rgb = unexpanded_storage != 0u ?
+               q5 * (8.0 / 255.0) : q5 / 31.0;
       }
-      else if (native_rgb5 != 0u &&
-          frag_texture_blend_mode != BLEND_MODE_RAW_TEXTURE)
-         output_rgb = floor(clamp(output_rgb, vec3(0.), vec3(1.)) * 31.) /
-                      31.;
+      else if (unexpanded_storage != 0u) {
+         if (native_rgb5 != 0u)
+            output_rgb = clamp(output_rgb, vec3(0.0), vec3(248.0 / 255.0));
+         if (frag_texture_blend_mode != BLEND_MODE_RAW_TEXTURE)
+            output_rgb = clamp(floor(max(output_rgb, vec3(0.0)) *
+                  255.0 + vec3(0.001)), vec3(0.0), vec3(255.0)) / 255.0;
+      }
 
       frag_color = vec4(output_rgb, color.a);
+   }
+   // Match the byte source presented to fixed and explicit blends. Native
+   // RGB5 and HDR keep their existing source rules.
+   if (unexpanded_storage != 0u && enhanced_texel &&
+       frag_texture_blend_mode == BLEND_MODE_RAW_TEXTURE)
+      frag_color.rgb = floor(max(frag_color.rgb, vec3(0.0)) *
+            255.0 + vec3(0.5)) / 255.0;
+
+   if (color_blend != 0u) {
+      vec3 destination = texelFetch(blend_texture,
+            ivec2(gl_FragCoord.xy), 0).rgb;
+      if (!enhanced_texel)
+         destination = clamp(floor(destination * (255.0 / 8.0) +
+               vec3(0.001)), vec3(0.0), vec3(31.0)) * (8.0 / 255.0);
+      vec3 source = frag_color.rgb;
+      vec3 result;
+      if (color_blend == 1u) result = (destination + source) * 0.5;
+      if (color_blend == 2u) result = destination + source;
+      if (color_blend == 3u) result = max(destination - source, vec3(0.0));
+      if (color_blend == 4u) result = destination + source * 0.25;
+      if (!enhanced_texel)
+         result = clamp(floor(result * (255.0 / 8.0) + vec3(0.001)),
+               vec3(0.0), vec3(31.0)) * (8.0 / 255.0);
+      else
+         result = floor(max(result, vec3(0.0)) * 255.0 + vec3(0.5)) / 255.0;
+      frag_color.rgb = min(result, vec3(248.0 / 255.0));
    }
    if (native_blend != 0u) {
       uvec3 source = uvec3(floor(clamp(frag_color.rgb, vec3(0.0),
