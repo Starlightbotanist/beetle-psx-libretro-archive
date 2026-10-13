@@ -3137,6 +3137,8 @@ static void gl_renderer_draw(gl_renderer *renderer)
    int16_t x;
    int16_t y;
    size_t bi;
+   GLint semi_uniform = -1, mask_uniform = -1, native_uniform = -1;
+   GLint color_uniform = -1, hot_uniform = -1;
 
    if (!renderer || static_renderer.state == GL_STATE_INVALID)
       return;
@@ -3159,20 +3161,27 @@ static void gl_renderer_draw(gl_renderer *renderer)
 
    if (renderer->command_buffer->program)
    {
+      const struct gl_uniform_map *uniforms =
+            &renderer->command_buffer->program->uniforms;
+      /* The linked command program is fixed for the whole submission.
+       * Resolve batch uniform locations once; every batch still writes its
+       * values, including after auxiliary ceiling/zero passes. */
+      semi_uniform = gl_uniform_map_get(uniforms, "draw_semi_transparent");
+      mask_uniform = gl_uniform_map_get(uniforms, "force_mask_bit");
+      native_uniform = gl_uniform_map_get(uniforms, "native_blend");
+      color_uniform = gl_uniform_map_get(uniforms, "color_blend");
+      hot_uniform = gl_uniform_map_get(uniforms, "hdr_hot");
       glUseProgram(renderer->command_buffer->program->id);
       glUniform2i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "offset"), (GLint)x, (GLint)y);
-      /* We use texture unit 0 */
-      glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "fb_texture"), 0);
-      /* HD replacement texture lives on unit 1 */
-      glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "hd_texture"), 1);
-      glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "palette_texture"), 2);
       glActiveTexture(GL_TEXTURE2);
       glBindTexture(GL_TEXTURE_2D, renderer->palette_texture.id);
-      glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms,
-               "fb_feedback_texture"), 3);
       glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms,
                "feedback_upscaling"), renderer->fb_feedback_texture.id ?
                renderer->internal_upscaling : 1);
+      /* Global options and the retained target are fixed for this submission. */
+      glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms,
+               "pgxp_fog"),
+            (renderer->fb_out_fp16 && psx_pgxp_color && psx_pgxp_fog) ? 1u : 0u);
       glActiveTexture(GL_TEXTURE0);
    }
 
@@ -3238,18 +3247,14 @@ static void gl_renderer_draw(gl_renderer *renderer)
       opaque = it->opaque;
       if (renderer->command_buffer->program)
       {
-         glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "draw_semi_transparent"), !opaque);
-         glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "force_mask_bit"), it->force_mask ? 1u : 0u);
-         glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms,
-                  "native_blend"), native_average ? 1u : native_quarter ? 2u : 0u);
-         glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms,
-                  "blend_texture"), 4);
-         glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms,
-                  "color_blend"), color_blend ? (unsigned)it->transparency_mode + 1u : 0u);
+         glUniform1ui(semi_uniform, !opaque);
+         glUniform1ui(mask_uniform, it->force_mask ? 1u : 0u);
+         glUniform1ui(native_uniform, native_average ? 1u : native_quarter ? 2u : 0u);
+         glUniform1ui(color_uniform, color_blend ? (unsigned)it->transparency_mode + 1u : 0u);
          /* "HDR Additive Overbright": skip the source clamp for plain
           * additive draws on the fp16 target only, matching the Vulkan
           * renderer (primitive.frag gates hot on BLEND_ADD). */
-         glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "hdr_hot"),
+         glUniform1ui(hot_uniform,
                (renderer->fb_out_fp16 &&
                 ((psx_hdr_overbright_hot && !it->opaque &&
                   it->transparency_mode == SEMI_TRANSPARENCY_MODE_ADD)
@@ -3259,8 +3264,6 @@ static void gl_renderer_draw(gl_renderer *renderer)
                   * shadow's accept rule refuses anything that would not
                   * requantize to the architectural bytes. */
                  || psx_pgxp_color)) ? 1u : 0u);
-         glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "pgxp_fog"),
-               (renderer->fb_out_fp16 && psx_pgxp_color && psx_pgxp_fog) ? 1u : 0u);
       }
       /* RGB5 averaging truncates (source + destination) / 2. Bias the
        * fixed-function result below the half-code rounding threshold,
@@ -3576,7 +3579,6 @@ static void gl_renderer_upload_textures(
                   "color_conversion"), renderer->unexpanded_storage ? 1u : 0u);
 
          glUseProgram(renderer->command_buffer->program->id);
-         glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "fb_texture"), 0);
       }
    }
 
@@ -3907,6 +3909,14 @@ static bool gl_renderer_new(gl_renderer *renderer, gl_draw_config config)
       uint32_t fixed_point_modulation = !psx_pgxp_color;
 
       glUseProgram(command_buffer->program->id);
+      /* Sampler units belong to the linked program and never change. Texture
+       * bindings still follow the live resources at each draw. Rebuilding a
+       * filter program or recreating the context initializes them again here. */
+      glUniform1i(gl_uniform_map_get(&command_buffer->program->uniforms, "fb_texture"), 0);
+      glUniform1i(gl_uniform_map_get(&command_buffer->program->uniforms, "hd_texture"), 1);
+      glUniform1i(gl_uniform_map_get(&command_buffer->program->uniforms, "palette_texture"), 2);
+      glUniform1i(gl_uniform_map_get(&command_buffer->program->uniforms, "fb_feedback_texture"), 3);
+      glUniform1i(gl_uniform_map_get(&command_buffer->program->uniforms, "blend_texture"), 4);
       glUniform1ui(gl_uniform_map_get(&command_buffer->program->uniforms, "dither_scaling"), dither_scaling);
       glUniform1ui(gl_uniform_map_get(&command_buffer->program->uniforms,
                "fixed_point_modulation"), fixed_point_modulation);
