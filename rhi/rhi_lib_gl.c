@@ -3661,6 +3661,18 @@ static void get_variables(uint8_t *upscaling, bool *display_vram)
    }
 }
 
+/* Match CPU word readback from the retained target: truncate q*8 storage,
+ * round normalized byte/float storage, and copy RGB5 directly. Use the
+ * allocated format so a failed settings change keeps the working policy.
+ * Regional copies and the final frame resolve must agree. */
+static uint32_t gl_native_mirror_conversion(const gl_renderer *renderer)
+{
+   if (renderer->unexpanded_storage)
+      return 2u;
+   return renderer->fb_out_internal_format == GL_RGBA8 ||
+         renderer->fb_out_internal_format == GL_RGBA16F ? 3u : 0u;
+}
+
 /* Storage selection is derived from the selected mode and enabled source
  * enhancements, never from the display's output format. No per-pixel color
  * provenance is retained. Ordinary writes over an enhanced destination still
@@ -7070,7 +7082,7 @@ void rhi_gl_finalize_frame(const void *fb, unsigned width,
          glUseProgram(renderer->image_load_buffer->program->id);
          glUniform1ui(gl_uniform_map_get(&renderer->image_load_buffer->program->uniforms, "internal_upscaling"), renderer->internal_upscaling);
          glUniform1ui(gl_uniform_map_get(&renderer->image_load_buffer->program->uniforms,
-                  "color_conversion"), renderer->unexpanded_storage ? 2u : 0u);
+                  "color_conversion"), gl_native_mirror_conversion(renderer));
       }
 
       if (!gl_draw_buffer_is_empty(renderer->image_load_buffer))
@@ -8541,10 +8553,11 @@ cleanup:
 
 
 #ifdef GL_READ_FRAMEBUFFER
-/* Authoritative output bytes encode q*8 on enhanced 16-bpp targets. A plain
- * UNORM blit into RGB5 would round them as q/31 and lose high codes. Convert
- * explicitly using the existing immediate image-load buffer. This is a
- * derived texture/CLUT mirror; it must never mutate fb_out or stencil. */
+/* SDR bytes encode q*8; HDR byte/float targets keep normalized colors. A plain
+ * UNORM blit can use the wrong scale or choose an adjacent RGB5 code near a
+ * conversion threshold. Match CPU readback explicitly through the existing
+ * image-load buffer. This derived mirror never mutates fb_out or stencil;
+ * HDR keeps its floating render target and only reduces the mirror. */
 static bool gl_resolve_color_rect(gl_renderer *renderer, gl_texture *dst,
       unsigned x, unsigned y, unsigned w, unsigned h)
 {
@@ -8584,7 +8597,8 @@ static bool gl_resolve_color_rect(gl_renderer *renderer, gl_texture *dst,
    glUniform1i(gl_uniform_map_get(uniforms, "fb_texture"), 0);
    glUniform1ui(gl_uniform_map_get(uniforms, "internal_upscaling"),
          renderer->internal_upscaling);
-   glUniform1ui(gl_uniform_map_get(uniforms, "color_conversion"), 2);
+   glUniform1ui(gl_uniform_map_get(uniforms, "color_conversion"),
+         gl_native_mirror_conversion(renderer));
    slice[0].position[0] = x;     slice[0].position[1] = y;
    slice[1].position[0] = x + w; slice[1].position[1] = y;
    slice[2].position[0] = x;     slice[2].position[1] = y + h;
@@ -8617,7 +8631,8 @@ static bool gl_blit_fb_out(gl_renderer *renderer, gl_texture *dst,
        !gl_caps.fp_glBlitFramebuffer)
       return false;
 
-   if (renderer->unexpanded_storage && dst == &renderer->fb_texture)
+   if (dst == &renderer->fb_texture &&
+       gl_native_mirror_conversion(renderer) != 0u)
       return gl_resolve_color_rect(renderer, dst, x, y, w, h);
 
    sx = (GLint)x * (GLint)renderer->internal_upscaling;
