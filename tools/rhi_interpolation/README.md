@@ -1,6 +1,11 @@
 # Packed RHI interpolation tests
 
-Run `make check` with a C compiler. No GPU, core, BIOS or game is required.
+Run `make check` with a C compiler and the usual POSIX shell/sed tools.
+No GPU, core, BIOS or game is required.
+
+The `check-shaders` step compares the line tie expression in the C test with
+both shader sources after removing whitespace. A missing or changed expression
+fails the check. This catches source drift; it does not execute either shader.
 
 The test includes the shipping `rhi_interpolation.h`. It checks descending-X
 endpoint packing, zero-length lines, anchor ties, and color planes sampled at

@@ -83,7 +83,7 @@ not originally presented as hardware-accurate rendering.
 
 These modes do not establish complete PS1 hardware accuracy. Geometry, texture
 sampling, timing and interlacing still have separate limitations. Exact native
-line selection remains limited to native settings with PGXP off; expanded
+line selection remains limited to 1x with PGXP off; expanded
 quads retain the enhanced/PGXP coverage needed to avoid geometry gaps.
 Pre-existing mask/copy defects are separate from this color policy.
 

@@ -1115,6 +1115,7 @@ STRINGIZE(
 void main() {
    frag_texture_coord = smooth_texture_coord;
    if ((frag_native_flags & 4u) != 0u) {
+      // Untextured lines pack their start/delta into frag_texture_limits.xy.
       ivec2 first = ivec2(int(frag_texture_limits.x << 16u) >> 16,
             int(frag_texture_limits.x) >> 16);
       ivec2 delta = ivec2(int(frag_texture_limits.y << 16u) >> 16,

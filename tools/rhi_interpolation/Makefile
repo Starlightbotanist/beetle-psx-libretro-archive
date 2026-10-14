@@ -10,10 +10,13 @@ all: interpolation$(EXEEXT)
 interpolation$(EXEEXT): interpolation.c $(ROOT)/rhi/rhi_interpolation.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ interpolation.c
 
-check: interpolation$(EXEEXT)
+check-shaders:
+	sh ./check_shaders.sh "$(ROOT)"
+
+check: check-shaders interpolation$(EXEEXT)
 	./interpolation$(EXEEXT)
 
 clean:
 	rm -f interpolation interpolation.exe
 
-.PHONY: all check clean
+.PHONY: all check check-shaders clean
