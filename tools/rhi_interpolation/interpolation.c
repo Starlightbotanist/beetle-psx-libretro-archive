@@ -1,6 +1,7 @@
 /* Check the shipping packed planes against an independent fixed-point walk.
  * GPU coverage, filtering, blending and scanout require renderer tests. */
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include "rhi/rhi_interpolation.h"
 
@@ -36,6 +37,22 @@ static uint32_t evaluate(const uint32_t *plane, int32_t x, int32_t y)
    return ((origin + dx * (uint32_t)x + dy * (uint32_t)y) >> 12) & 255u;
 }
 
+/* Integer equivalent of primitive_line_coverage() and the GL fragment
+ * shader's native-line block. Keep this expression in sync with both shaders;
+ * compare its selected pixel against the independent 32-fractional-bit walk. */
+static int32_t shader_line_minor(int32_t dx, int32_t dy, int32_t k)
+{
+   bool horizontal = abs(dx) > abs(dy);
+   int32_t steps = horizontal ? abs(dx) : abs(dy);
+   int32_t d = horizontal ? dy : dx;
+   int32_t n, divisor;
+   if (!steps)
+      return 0;
+   n = 2 * d * k + steps - ((!horizontal || d < 0) ? 1 : 0);
+   divisor = 2 * steps;
+   return (n - (n < 0 ? divisor - 1 : 0)) / divisor;
+}
+
 static void check_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1)
 {
    int32_t x[2] = {x0, x1}, y[2] = {y0, y1};
@@ -56,6 +73,7 @@ static void check_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1)
    check("line delta X", (uint16_t)coverage[1], (uint16_t)dx);
    check("line delta Y", coverage[1] >> 16, (uint16_t)dy);
    check("zero-length line", valid, steps != 0);
+   check("zero-length coverage", shader_line_minor(0, 0, 0), 0);
    if (!steps)
       return;
 
@@ -79,6 +97,18 @@ static void check_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1)
       sy = (sy + (sy < 0 ? -(steps - 1) : sy > 0 ? steps - 1 : 0)) / steps;
       for (k = 0; k <= steps; k++)
       {
+         if (channel == 0)
+         {
+            bool horizontal = ax > ay;
+            int32_t sx_pixel = x[anchor] + (horizontal ? k :
+                  shader_line_minor(dx, dy, k));
+            int32_t sy_pixel = y[anchor] + (horizontal ?
+                  shader_line_minor(dx, dy, k) : dy < 0 ? -k : k);
+            check("shader line X at DDA step", (uint32_t)sx_pixel,
+                  (uint32_t)(int32_t)(px >> 32));
+            check("shader line Y at DDA step", (uint32_t)sy_pixel,
+                  (uint32_t)(int32_t)(py >> 32));
+         }
          check("line color at DDA pixel", evaluate(planes + channel * 2,
                (int32_t)(px >> 32), (int32_t)(py >> 32)), (color >> 12) & 255u);
          px += sx;
@@ -136,6 +166,22 @@ int main(void)
          for (x1 = -4; x1 <= 4; x1++)
             for (y1 = -4; y1 <= 4; y1++)
                check_line(x0, y0, x1, y1);
+   /* Cover the GP0 maximum legal spans and both signs, including the
+    * long inexact steps for which ceil-magnitude coordinate division matters.
+    * Translation and endpoint reversal must not change tie selection. */
+   for (i = 0; i < 4096; i++)
+   {
+      int32_t dx = next_random() % 1024u;
+      int32_t dy = (int32_t)(next_random() % 1023u) - 511;
+      int32_t ox = (int32_t)(next_random() % 2048u) - 1024;
+      int32_t oy = (int32_t)(next_random() % 2048u) - 1024;
+      check_line(ox, oy, ox + dx, oy + dy);
+      check_line(ox + dx, oy + dy, ox, oy);
+   }
+   check_line(0, 0, 1, 2);
+   check_line(0, 2, 1, 0);
+   check_line(-1024, -1024, -1, -513);
+   check_line(1023, 511, 0, 0);
    for (i = 0; i < 20000; i++)
    {
       int32_t x[3], y[3], value[3];
