@@ -20947,7 +20947,8 @@ void rhi_vulkan_prepare_frame(void)
         (renderer->render_state.scanout_filter == ScanoutFilter_SSAA ||
          renderer->render_state.adaptive_smoothing)) ||
        (psx_internal_color_mode == PSX_INTERNAL_COLOR_16BPP &&
-        (filter_mode != FilterMode_NearestNeighbor || replace_textures)));
+        (filter_mode != FilterMode_NearestNeighbor ||
+         texture_tracker_hd_textures_enabled(replace_textures))));
 }
 
 static ScanoutMode get_scanout_mode(bool bpp24)

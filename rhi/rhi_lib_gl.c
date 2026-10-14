@@ -3669,7 +3669,8 @@ static bool gl_use_unexpanded_storage(uint8_t filter)
    return !psx_hdr_active &&
          (psx_internal_color_mode == PSX_INTERNAL_COLOR_32BPP ||
           (psx_internal_color_mode == PSX_INTERNAL_COLOR_16BPP &&
-           (filter != FILTER_MODE_NEAREST || hd)));
+           (filter != FILTER_MODE_NEAREST ||
+            texture_tracker_hd_textures_enabled(hd))));
 }
 
 static bool gl_renderer_new(gl_renderer *renderer, gl_draw_config config)
@@ -6783,6 +6784,23 @@ void rhi_gl_prepare_frame(void)
    }
 
    gl_normalize_inherited_state();
+
+   /* The HD hotkey does not send a core-option update. Change storage at
+    * the next frame boundary through the existing VRAM-preserving refresh.
+    * A failed allocation retains the working target and retries next frame. */
+   if (!psx_hdr_active && renderer->color_mode == PSX_INTERNAL_COLOR_16BPP &&
+       renderer->filter_type == FILTER_MODE_NEAREST &&
+       gl_use_unexpanded_storage(renderer->filter_type) !=
+             renderer->unexpanded_storage)
+   {
+      rhi_gl_refresh_variables();
+      /* Refresh may recreate the context; do not retain the old pointer. */
+      if (static_renderer.state == GL_STATE_INVALID ||
+          !static_renderer.state_data)
+         return;
+      renderer = static_renderer.state_data;
+      gl_normalize_inherited_state();
+   }
 
    /* In case we're upscaling we need to increase the line width
     * proportionally */
