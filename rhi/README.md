@@ -64,6 +64,16 @@ The separate Vulkan native-color toggle is removed. Re-select Internal Color
 Depth when updating a configuration that used that toggle; there is no
 automatic migration between the old and new settings.
 
+Vulkan's old default retained higher precision while drawing, then reduced the
+display when dithering was enabled. With dithering disabled it also retained
+higher-color output. The shared default **16 bpp** now reduces ordinary draws
+while rendering, even with dithering disabled. This affects existing Vulkan
+users who left the old native-color toggle off as well as users who enabled it.
+Select **32 bpp** to retain higher-precision ordinary drawing; dithering is then
+an independent visual choice. These settings do not recreate the old late
+display-only dither formula. Existing OpenGL depth selections retain their
+saved values; enhanced 16-bpp sources have the preservation policy above.
+
 ### Scope and validation
 
 Legacy Vulkan dithering was intentionally a late scanout presentation effect.
@@ -76,6 +86,27 @@ sampling, timing and interlacing still have separate limitations. Exact native
 line selection remains limited to native settings with PGXP off; expanded
 quads retain the enhanced/PGXP coverage needed to avoid geometry gaps.
 Pre-existing mask/copy defects are separate from this color policy.
+
+Line coverage and color interpolation have separate contracts. Exact pixel
+selection is shared between the APIs as follows (integral coordinates,
+unit W, PGXP off, and Vulkan single-sample unless stated):
+
+| Drawing conditions | OpenGL coverage | Vulkan coverage |
+| --- | --- | --- |
+| 1x, Native/16 bpp, nearest, SDR | Exact native pixels | Exact native pixels |
+| 1x, Native/16 bpp, texture filtering | Exact native pixels | Exact native pixels |
+| 1x, 32 bpp or accepted HDR | Exact native pixels | Exact native pixels |
+| 1x, nearest, HD replacements enabled | Exact native pixels for lines | Exact native pixels for lines |
+| Upscaled, fractional geometry, or Vulkan MSAA | Expanded quads | Expanded quads |
+| PGXP geometry | Expanded quads by default | Expanded quads |
+
+PS1 lines are untextured: GL passes no HD handle for a line, so the polygon's
+HD-handle check does not exclude lines merely because replacements are enabled.
+Both renderers separate line coverage from shading eligibility. GL integer
+color/UV interpolation still requires Native/16-bpp nearest non-HD drawing
+without precise PGXP color or FP16 storage; broadening coverage does not change
+those shading rules. GL's existing PGXP line-expansion opt-out retains its driver-line
+route; the default quads protect contacts with PGXP polygons from geometry gaps.
 
 Arithmetic fixtures, canonical VRAM comparisons and displayed gameplay
 comparisons test different contracts. A passing finite suite is not a claim
