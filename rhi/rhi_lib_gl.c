@@ -5795,20 +5795,13 @@ static void gl_set_native_color_plane(gl_command_vertex *v,
    v->native_flags |= 1;
 }
 
-/* Eligibility for integer interpolation and native line coverage only.
- * Unlike Vulkan's UV planes, GL keeps filtered, HD, wide and precise-colour
- * draws on their existing floating path. PGXP geometry must not acquire the
- * original-grid line mask. RGB5 blending has a separate target-format gate
- * in gl_renderer_draw and is not restricted to this native geometry path. */
+/* Coverage depends on geometry, not color depth or texture sampling. Match
+ * Vulkan's original-grid selection without applying it to PGXP or upscaling. */
 static bool gl_native_positions(const gl_renderer *renderer,
-      const gl_command_vertex *v, unsigned count, HdTextureHandle hd,
-      int32_t *x, int32_t *y)
+      const gl_command_vertex *v, unsigned count, int32_t *x, int32_t *y)
 {
    unsigned i;
-   if (renderer->internal_color_depth != 16 || renderer->fb_out_fp16 ||
-       renderer->internal_upscaling != 1 || psx_pgxp_mode != 0 ||
-       psx_pgxp_color || renderer->filter_type != FILTER_MODE_NEAREST ||
-       !hd_handle_is_none(&hd))
+   if (renderer->internal_upscaling != 1 || psx_pgxp_mode != 0)
       return false;
    for (i = 0; i < count; i++)
    {
@@ -5826,6 +5819,16 @@ static bool gl_native_positions(const gl_renderer *renderer,
    return true;
 }
 
+/* Integer color/UV interpolation retains its narrower shading policy.
+ * Native line coverage is independent of these restrictions. RGB5 blending
+ * also has its own target-format gate in gl_renderer_draw. */
+static bool gl_native_shading(const gl_renderer *renderer, HdTextureHandle hd)
+{
+   return renderer->internal_color_depth == 16 && !renderer->fb_out_fp16 &&
+         !psx_pgxp_color && renderer->filter_type == FILTER_MODE_NEAREST &&
+         hd_handle_is_none(&hd);
+}
+
 /* Queued GP0 colours and draw-offset-adjusted positions are authoritative.
  * The wrapped 8.12 planes travel with the primitive; no side state survives
  * a flush, reset or savestate restore. Flat colours need no plane. */
@@ -5837,7 +5840,8 @@ static void gl_build_native_triangle_interpolants(gl_renderer *renderer,
    int64_t denom;
    uint32_t planes[6];
    unsigned i, c, anchor;
-   if (!gl_native_positions(renderer, v, 3, hd, x, y))
+   if (!gl_native_shading(renderer, hd) ||
+       !gl_native_positions(renderer, v, 3, x, y))
       return;
    for (i = 0; i < 3; i++)
       v[i].native_flags |= 8;
@@ -7817,7 +7821,7 @@ void rhi_gl_push_line(
       {
          int32_t x[2], y[2];
          HdTextureHandle hd = hd_handle_make_none();
-         if (gl_native_positions(renderer, v, 2, hd, x, y))
+         if (gl_native_positions(renderer, v, 2, x, y))
          {
             gl_command_vertex quad[4], triangles[6];
             uint32_t colors[2] = {c0, c1}, planes[6], coverage[2];
@@ -7826,7 +7830,7 @@ void rhi_gl_push_line(
             int32_t dy = y[1 - anchor] - y[anchor];
             bool horizontal = abs(dx) > abs(dy);
             int32_t steps = horizontal ? abs(dx) : abs(dy);
-            bool gouraud = c0 != c1 &&
+            bool gouraud = c0 != c1 && gl_native_shading(renderer, hd) &&
                   rhi_line_color_planes(planes, x, y, colors);
             rhi_pack_line_coverage(coverage, x, y);
             gl_build_line_quad(quad, v);

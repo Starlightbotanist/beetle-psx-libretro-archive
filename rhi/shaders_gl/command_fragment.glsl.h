@@ -88,10 +88,10 @@ uniform uint force_mask_bit;
 
 in vec3 frag_shading_color;
 in vec4 frag_fog;
+flat in uint frag_native_flags;
 )
 #if !defined(FILTER_SABR) && !defined(FILTER_XBR)
 STRINGIZE(
-flat in uint frag_native_flags;
 flat in uvec3 frag_color_origin;
 flat in uvec3 frag_color_dx;
 flat in uvec3 frag_color_dy;
@@ -1114,14 +1114,12 @@ vec4 get_texel_jinc2(out float opacity)
 STRINGIZE(
 void main() {
    frag_texture_coord = smooth_texture_coord;
-)
-#if !defined(FILTER_SABR) && !defined(FILTER_XBR)
-STRINGIZE(
    if ((frag_native_flags & 4u) != 0u) {
-      ivec2 first = ivec2(int(frag_native_uv.x << 16u) >> 16,
-            int(frag_native_uv.x) >> 16);
-      ivec2 delta = ivec2(int(frag_native_uv.y << 16u) >> 16,
-            int(frag_native_uv.y) >> 16);
+      // Untextured lines pack their start/delta into frag_texture_limits.xy.
+      ivec2 first = ivec2(int(frag_texture_limits.x << 16u) >> 16,
+            int(frag_texture_limits.x) >> 16);
+      ivec2 delta = ivec2(int(frag_texture_limits.y << 16u) >> 16,
+            int(frag_texture_limits.y) >> 16);
       ivec2 coord = ivec2(gl_FragCoord.xy);
       int steps = max(abs(delta.x), abs(delta.y));
       bool horizontal = abs(delta.x) > abs(delta.y);
@@ -1143,6 +1141,9 @@ STRINGIZE(
       if ((horizontal ? coord.y : coord.x) != minor)
          discard;
    }
+)
+#if !defined(FILTER_SABR) && !defined(FILTER_XBR)
+STRINGIZE(
    if ((frag_native_flags & 2u) != 0u) {
       uvec2 low = frag_native_uv.xz;
       uvec2 high = frag_native_uv.yw;
