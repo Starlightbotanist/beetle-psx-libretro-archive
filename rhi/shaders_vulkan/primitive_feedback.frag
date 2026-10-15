@@ -31,6 +31,19 @@ void main()
 		discard;
 
 	vec3 shaded = source.rgb;
+	vec3 blend_source = shaded;
+#ifdef TEXTURED
+	/* Match the existing HDR feedback contract: opaque texels use the
+	 * saturated source, while additive/subtractive blends may use a hot
+	 * source. Keep both for fractional replacement-texture alpha too. */
+	if (FRAMEBUFFER_FLOAT16 != 0)
+	{
+		shaded = clamp(shaded, 0.0, 1.0);
+		blend_source = HDR_HOT_SOURCE != 0 &&
+			(BLEND_MODE == 0 || BLEND_MODE == 2) ?
+			max(blend_source, vec3(0.0)) : shaded;
+	}
+#endif
 	vec3 background = destination.rgb;
 	bool rgb5 = primitive_native_color() &&
 		(!enhanced_texel || primitive_strict_color());
@@ -53,11 +66,11 @@ void main()
 	}
 	vec3 blended;
 	if (BLEND_MODE == 0)
-		blended = shaded + background;
+		blended = blend_source + background;
 	if (BLEND_MODE == 1)
 		blended = 0.5 * (clamp(shaded, 0.0, 1.0) + background);
 	if (BLEND_MODE == 2)
-		blended = max(min(background, vec3(1.0)) - shaded, vec3(0.0));
+		blended = max(min(background, vec3(1.0)) - blend_source, vec3(0.0));
 	if (BLEND_MODE == 3)
 		blended = clamp(shaded, 0.0, 1.0) * 0.25 + background;
 	FragColor = vec4(mix(shaded, blended, blend_amt), source.a);

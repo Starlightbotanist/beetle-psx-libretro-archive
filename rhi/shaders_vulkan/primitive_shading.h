@@ -34,7 +34,7 @@ layout(constant_id = 1) const int FILTER_TYPE = FILTER_NEAREST;
 
 #endif
 
-/* Fixed-function and programmable blends use the same source clamp.
+/* Sampling and modulation are shared; HDR source clamps retain each blend path's contract.
  * This is shared with primitive_feedback.frag. The fixed-function additive path
  * (ONE/ONE ADD) carries fragment output through unclamped on the 16F HDR
  * target, so the overbright option is honoured by conditionally skipping the
@@ -46,8 +46,8 @@ const int BLEND_ADD = 0;
 layout(constant_id = 2) const int BLEND_MODE = BLEND_ADD;
 #ifdef TEXTURED
 layout(constant_id = 6) const int HDR_HOT_SOURCE = 0;
-/* PGXP precise colour: the vertex colour itself may exceed 1.0 (the GTE's
- * pre-saturation value), so the source clamp stands aside on every draw,
+/* Fixed-function PGXP precise colour may exceed 1.0 (the GTE's
+ * pre-saturation value), so that path's source clamp stands aside on every draw,
  * not just plain additive. The rhi forces this to 0 off the fp16 target,
  * which keeps the hot path SDR-safe the same way HDR_HOT_SOURCE is. */
 layout(constant_id = 8) const int PRECISE_COLOR = 0;
@@ -194,21 +194,22 @@ void primitive_source(out vec4 source, out bool enhanced_texel,
 	}
 	vec3 shaded_hot = raw_texture ? color.rgb :
 		color.rgb * ((PGXP_FOG != 0) ? pgxp_fog_mix(shade_color, vFog) : shade_color) * (255.0 / 128.0);
-	/* SDR dithering precedes saturation. The wide HDR policy stays unchanged. */
-	vec3 shaded = FRAMEBUFFER_FLOAT16 == 0 ? shaded_hot : clamp(shaded_hot, 0.0, 1.0);
-	/* The semi-trans-opaque pass and every other blend mode stay clamped;
-	 * over-white there comes only from stacking, matching the option text. */
-	if (HDR_HOT_SOURCE != 0 && TRANSPARENCY_MODE == SEMI_TRANS &&
-		(BLEND_MODE == BLEND_ADD
 #ifdef FEEDBACK
-		 || BLEND_MODE == 2
-#endif
-		))
+	/* HDR feedback chooses its ordinary and boosted sources while blending.
+	 * Keep modulation shared without imposing the fixed-function clamp. */
+	vec3 shaded = shaded_hot;
+#else
+	/* SDR dithering precedes saturation. Preserve the existing fixed-function
+	 * HDR precise-colour policy. */
+	vec3 shaded = FRAMEBUFFER_FLOAT16 == 0 ? shaded_hot : clamp(shaded_hot, 0.0, 1.0);
+	if (HDR_HOT_SOURCE != 0 && TRANSPARENCY_MODE == SEMI_TRANS &&
+		BLEND_MODE == BLEND_ADD)
 		shaded = shaded_hot;
 	if (PRECISE_COLOR != 0)
 		/* Hot above white, still floored at zero: a negative source is
 		 * anti-light and unrepresentable on hardware. */
 		shaded = max(shaded_hot, vec3(0.0));
+#endif
 	source = vec4(shaded, NNColor.a + vColor.a);
 #else
 #ifdef CEILING
