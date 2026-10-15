@@ -40,7 +40,7 @@ vec2 clamp_coord(vec2 coord)
  * Vertex limits are enhancement clamps, not part of this integer path. */
 vec2 native_texture_coord()
 {
-	if ((uint(vParam.z) & 0x0008u) == 0u)
+	if (SCALE != 1 || (uint(vParam.z) & 0x0008u) == 0u)
 		return clamp_coord(vUV);
 	uvec2 coord = uvec2(gl_FragCoord.xy);
 	uvec2 uv = vUVOrigin + coord.x * vUVDX + coord.y * vUVDY;
@@ -49,9 +49,7 @@ vec2 native_texture_coord()
 
 vec4 decode_vram_color(uint value)
 {
-    bool expanded = (uint(vParam.z) &
-          (PARAM_NATIVE_COLOR | PARAM_HDR_COLOR)) == 0u;
-    return abgr1555_color(value, expanded);
+    return abgr1555_color(value, PRIMITIVE_COLOR_MODE == 2);
 }
 
 // Nearest neighbor

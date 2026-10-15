@@ -8,6 +8,8 @@
  * directly below the libretro plumbing's preamble. */
 
 #include "rhi_lib_vulkan.h"
+#include "mednafen/mednafen.h"
+#include "mednafen/psx/gpu.h"
 
 #include "rhi_intf.h" /* FPS and audio sample rate macros */
 #include "rhi_interpolation.h"
@@ -67,7 +69,6 @@ extern retro_log_printf_t log_cb;
 extern int   psx_hdr_overbright_hot;   /* additive/sub source: 0 clamped, 1 hot */
 extern unsigned int psx_pgxp_mode;
 extern int   psx_pgxp_color;           /* PGXP precise colour: vertex colour may exceed 1.0 on fp16 */
-extern int   psx_pgxp_fog;             /* PGXP byte-domain depth cue; effective only with precise colour */
 /* "HDR True Multi-Pass Blending": 1 routes non-masked subtractive prims
  * through the per-primitive programmable-blend path; 0 keeps them on
  * fixed-function REVERSE_SUBTRACT and floors the result with a MAX-blend
@@ -1595,7 +1596,7 @@ static bool context_is_valid(const struct Context *self) { return self->valid; }
     * rejected there is silently never applied to any pipeline -- while a
     * constant set past this bound is an out-of-bounds write into the
     * static state. Both happened; keep them in step. */
-   enum { VULKAN_NUM_SPEC_CONSTANTS = 11 };
+   enum { VULKAN_NUM_SPEC_CONSTANTS = 13 };
 
    struct ImplementationWorkarounds
    {
@@ -5651,10 +5652,9 @@ static void renderer_set_interpolant_attribs(CommandBuffer *cmd)
       ScanoutMode scanout_mode;
       ScanoutFilter scanout_filter;
       ScanoutFilter scanout_mdec_filter;
-      /* Frame-latched native-colour configuration. The first flag selects
-       * native versus internal-resolution dither spacing; the second selects
-       * RGB5 write-time storage independently of each primitive's DTD bit. */
-      bool dither_native_resolution;
+      /* Frame-latched drawing policy. Dither spacing and RGB5 storage are
+       * independent of each primitive's GP0 DTD bit. */
+      enum dither_mode dither_mode;
       bool native_color;
       enum psx_internal_color_mode_e color_mode;
       /* Resolves and expanded enhanced color must not observe deferred
@@ -5716,7 +5716,7 @@ static void render_state_init(struct RenderState *s)
    s->scanout_mode = ScanoutMode_ABGR1555_555;
    s->scanout_filter = ScanoutFilter_None;
    s->scanout_mdec_filter = ScanoutFilter_None;
-   s->dither_native_resolution = false;
+   s->dither_mode = DITHER_UPSCALED;
    s->native_color = false;
    s->color_mode = PSX_INTERNAL_COLOR_16BPP;
    s->canonical_color = false;
@@ -5872,10 +5872,12 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
        * Its own slot rather than an alias: it is declared by the primitive
        * programs, which also declare 0..6. */
       SpecConstIndex_PreciseColor = 8,
-      /* Linear-light depth cueing; rides the precise-colour vertex path. */
-      SpecConstIndex_PgxpFog = 9,
+      /* Global primitive color policy; the shader folds unused mode paths. */
+      SpecConstIndex_PrimitiveColorMode = 9,
       /* Actual primitive render-target format, independent of HDR options. */
       SpecConstIndex_FramebufferFloat16 = 10,
+      SpecConstIndex_DitherMode = 11,
+      SpecConstIndex_HighResTexture = 12,
       /* Resolve programs use slot 8 independently of primitive PreciseColor.
        * Canonical RGB5 uploads expand before 32-bpp drawing; rendered byte
        * colors retain their existing values through atlas resolves. */
@@ -6183,6 +6185,19 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
       BlitInfoVec_clear(&self->queue.unscaled_masked_blits);
    }
 
+   static void renderer_set_primitive_color_spec_constants(Renderer *self,
+         CommandBuffer *cmd)
+   {
+      unsigned mode = psx_hdr_active ? 3u :
+            (self->render_state.native_color ?
+             (unsigned)self->render_state.color_mode : PSX_INTERNAL_COLOR_32BPP);
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_PrimitiveColorMode, mode);
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_DitherMode,
+            psx_hdr_active ? DITHER_OFF : self->render_state.dither_mode);
+      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_FramebufferFloat16,
+            self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT);
+   }
+
    static void renderer_set_opaque_primitive_spec_constants(Renderer *self,
          int trans_mode)
    {
@@ -6198,10 +6213,7 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
       commandbuffer_set_specialization_constant(cmd, SpecConstIndex_MaskTest, 0);
       commandbuffer_set_specialization_constant(cmd, SpecConstIndex_PreciseColor,
             (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? psx_pgxp_color : 0);
-      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_PgxpFog,
-            (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? (psx_pgxp_color && psx_pgxp_fog) : 0);
-      commandbuffer_set_specialization_constant(cmd, SpecConstIndex_FramebufferFloat16,
-            self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT);
+      renderer_set_primitive_color_spec_constants(self, cmd);
    }
 
    static void renderer_render_semi_transparent_opaque_texture_primitives(Renderer *self){
@@ -9324,23 +9336,7 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    /* HDR disables PS1 dithering even when FP16 storage is unavailable. */
    if (self->render_state.primitive_dither && !psx_hdr_active)
       param = (int16_t)((uint16_t)param | 0x8000u);
-   if (self->render_state.native_color)
-   {
-      /* 0x0400 (formerly an unconsumed cache-hit debug marker) selects native
-       * RGB5 storage; 0x4000 selects a 4x4 dither pattern in native PS1 pixels
-       * instead of internal-resolution pixels. Both are authoritative frame
-       * configuration, while 0x8000 above is the individual primitive's GP0
-       * DTD bit. */
-      param = (int16_t)((uint16_t)param | 0x0400u);
-      if (self->render_state.color_mode == PSX_INTERNAL_COLOR_NATIVE)
-         param = (int16_t)((uint16_t)param | 0x0020u);
-   }
-   /* Preserve the accepted output policy even when HDR falls back to an
-    * RGBA8 render target. Framebuffer format alone cannot identify SDR. */
-   if (psx_hdr_active)
-      param = (int16_t)((uint16_t)param | 0x0040u);
-   if (self->render_state.dither_native_resolution)
-      param = (int16_t)((uint16_t)param | 0x4000u);
+   /* Color policy is specialized once per batch, separately from GP0 DTD. */
 
    {
    /* These fields are shared by every vertex of this queued primitive.
@@ -10339,6 +10335,11 @@ static void renderer_hd_texture_uniforms(Renderer *self,
    };
    HdTexture hd = texture_tracker_get_hd_texture(self->tracker, hd_texture_index);
    Image *hd_img = (Image *)hd.texture; /* the Vulkan TTGpuBackend hands out Image* */
+   /* The existing draw batches already separate replacement handles. A none
+    * handle also sets the per-primitive skip flag; specialize that common
+    * case without depending on the menu or the live replacement toggle. */
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd),
+         SpecConstIndex_HighResTexture, !hd_handle_is_none(&hd_texture_index));
    commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 4, image_get_view(hd_img), StockSampler_TrilinearClamp); /* Type of sampler only matters for the fast path */
    { struct HDPush push = {
       hd.vram_rect.x, hd.vram_rect.y, hd.vram_rect.width, hd.vram_rect.height,
@@ -11128,10 +11129,7 @@ static void renderer_semi_transparent_set_state(Renderer *self,
     * UNORM write clamps regardless, so a variant would be identical. */
    commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_PreciseColor,
          (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? psx_pgxp_color : 0);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_PgxpFog,
-         (self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT) ? (psx_pgxp_color && psx_pgxp_fog) : 0);
-   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FramebufferFloat16,
-         self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT);
+   renderer_set_primitive_color_spec_constants(self, cbh_get(&self->cmd));
    commandbuffer_set_specialization_constant(cbh_get(&self->cmd),
          SpecConstIndex_TransMode, TransMode_SemiTrans);
    /* Only the feedback programs declare this; the pipeline hash masks it out
@@ -20019,11 +20017,6 @@ static void image_resource_holder_fini(struct ImageResourceHolder *self)
 
 #include "libretro_vulkan.h"
 
-/* #include "mednafen/mednafen.h" is required
- * for #include "mednafen/psx/gpu.h" to work properly. */
-#include "mednafen/mednafen.h"
-#include "mednafen/psx/gpu.h"
-
 #include "libretro_cbs.h"
 #include "libretro_options.h"
 #include "beetle_psx_globals.h"
@@ -20033,6 +20026,7 @@ static Context *context = NULL;
 static Device *device = NULL;
 static Renderer *renderer = NULL;
 static unsigned scaling = 4;
+extern enum dither_mode psx_gpu_dither_mode;
 /* Deferred geometry-change state. refresh_variables must not call
  * SET_SYSTEM_AV_INFO inline: the frontend handles it synchronously, tearing down
  * and rebuilding the device/renderer while a frame started by prepare_frame is
@@ -20144,7 +20138,6 @@ static bool mdec_yuv;
  * rhi/rhi_defer.h for which ops are deferred and which are dropped.
  */
 static rhi_defer_queue_t defer = { NULL, 0, 0 };
-static enum dither_mode dither_mode = DITHER_NATIVE;
 static bool dump_textures = false;
 static bool replace_textures = false;
 static bool track_textures = false;
@@ -20613,16 +20606,6 @@ void rhi_vulkan_refresh_variables(void)
          mdec_yuv = false;
    }
 
-   var.key = BEETLE_OPT(dither_mode);
-   dither_mode = DITHER_NATIVE;
-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-   {
-      if (!strcmp(var.value, "internal resolution"))
-         dither_mode = DITHER_UPSCALED;
-      else if (!strcmp(var.value, "disabled"))
-         dither_mode = DITHER_OFF;
-   }
-
    var.key = BEETLE_OPT(crop_overscan);
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
@@ -20902,6 +20885,8 @@ static void renderer_reduce_cached_color(Renderer *self)
    CommandBuffer *cmd;
    unsigned i;
 
+   /* Submit old-policy vertices before changing the global pipeline mode. */
+   renderer_flush(self);
    fbatlas_write_compute(&self->atlas, Domain_Unscaled, &full);
    renderer_ensure_command_buffer(self);
    cmd = cbh_get(&self->cmd);
@@ -20935,6 +20920,9 @@ static void renderer_reduce_cached_color(Renderer *self)
 
 void rhi_vulkan_prepare_frame(void)
 {
+   enum dither_mode pattern = psx_hdr_active ? DITHER_OFF : psx_gpu_dither_mode;
+   bool native_color = !psx_hdr_active &&
+         psx_internal_color_mode != PSX_INTERNAL_COLOR_32BPP;
    if (device == NULL)
    {
       /* The HW context is down (between context_destroy and the next
@@ -20969,14 +20957,15 @@ void rhi_vulkan_prepare_frame(void)
    /* The option selects drawing policy, not storage format. Latch it
     * before GP0 work; accepted HDR overrides low-color drawing, while
     * preserving the selected SDR mode for fallback. */
+   if (renderer->render_state.native_color != native_color ||
+       renderer->render_state.dither_mode != pattern)
+      renderer_flush(renderer);
    if (!psx_hdr_active &&
        renderer->render_state.color_mode != psx_internal_color_mode)
       renderer_reduce_cached_color(renderer);
    renderer->render_state.color_mode = psx_internal_color_mode;
-   renderer->render_state.native_color = !psx_hdr_active &&
-      psx_internal_color_mode != PSX_INTERNAL_COLOR_32BPP;
-   renderer->render_state.dither_native_resolution =
-      dither_mode == DITHER_NATIVE;
+   renderer->render_state.native_color = native_color;
+   renderer->render_state.dither_mode = pattern;
    renderer->render_state.canonical_color =
       renderer->render_state.native_color &&
       (renderer->msaa > 1 ||
@@ -21344,8 +21333,8 @@ static void vertices_set_cf(Vertex *v, int n, const float *precise_rgb)
             : (float)((v[i].color >> (c * 8)) & 0xFF) / 255.0f;
 }
 
-/* Depth-cue sidecar per vertex: 4 floats (far colour, t) or NULL for none.
- * t == 0 is the no-cue encoding the shader treats as identity. */
+/* Preserve the RHI lanes used by packed native interpolation.
+ * gpu_polygon.c completes depth cueing before submission and supplies zeros. */
 static void vertices_set_fog(Vertex *v, int n, const float *fog)
 {
    int i, c;

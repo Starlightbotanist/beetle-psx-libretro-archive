@@ -12,6 +12,9 @@
 
 #ifdef TEXTURED
 layout(set = 0, binding = 4) uniform sampler2D uHighResTexture;
+/* No replacement handle is bound in the common case. Keep the old path as
+ * the default; the host disables it for batches whose handle is none. */
+layout(constant_id = 12) const int HIGH_RES_TEXTURE = 1;
 layout(push_constant, std430) uniform Push
 {
 	ivec4 hd_texture_vram_rect; // The area of vram this hd texture covers
@@ -53,15 +56,7 @@ layout(constant_id = 6) const int HDR_HOT_SOURCE = 0;
 layout(constant_id = 8) const int PRECISE_COLOR = 0;
 #endif
 
-/* PGXP byte-domain depth cueing; rides the precise-colour vertex path.
- * Common scope: fog applies to untextured gouraud (the classic depth-cued
- * geometry) as much as to textured surfaces. The rhi forces this to 0 off
- * the fp16 target and when either option is off, so the mix is evaluated
- * only where the feature is live. */
-layout(constant_id = 9) const int PGXP_FOG = 0;
-layout(location = 6) in highp vec4 vFog;
-
-#include "pgxp_fog.h"
+/* gpu_polygon.c supplies the finished per-vertex depth-cued color. */
 
 void primitive_source(out vec4 source, out bool enhanced_texel,
 		out float blend_amt)
@@ -79,8 +74,8 @@ void primitive_source(out vec4 source, out bool enhanced_texel,
 #ifdef TEXTURED
 	vec4 NNColor;
 
-	bool fastpath = (vParam.z & 0x100) != 0;
-	bool hd_enabled = !fastpath && (vParam.z & 0x200) == 0;
+	bool fastpath = HIGH_RES_TEXTURE != 0 && (vParam.z & 0x100) != 0;
+	bool hd_enabled = HIGH_RES_TEXTURE != 0 && !fastpath && (vParam.z & 0x200) == 0;
 
 	vec4 hdColor;
 	if (fastpath) {
@@ -176,8 +171,7 @@ void primitive_source(out vec4 source, out bool enhanced_texel,
 			/* Direct-colour feedback must quantize each GP0 modulation step,
 			 * even on an FP16 target, so repeated fades decay at hardware rate.
 			 * Standard-colour feedback retains the same established path. */
-			vec3 fshade = clamp((PGXP_FOG != 0) ?
-				pgxp_fog_mix(shade_color, vFog) : shade_color, 0.0, 1.0);
+			vec3 fshade = clamp(shade_color, 0.0, 1.0);
 			vec3 shade8 = psx_color8(fshade);
 			vec3 modulated = floor(texel5 * shade8 / 16.0);
 			float md = primitive_dither_offset();
@@ -188,14 +182,14 @@ void primitive_source(out vec4 source, out bool enhanced_texel,
 			 * white agrees with an untextured white background during fades. */
 			source = vec4(primitive_native_color() ?
 				q5 * (8.0 / 255.0) :
-				((uint(vParam.z) & PARAM_HDR_COLOR) == 0u ?
+				(PRIMITIVE_COLOR_MODE != 3 ?
 					psx_expand_color5(q5) : q5 / 31.0),
 				NNColor.a + vColor.a);
 			return;
 		}
 	}
 	vec3 shaded_hot = raw_texture ? color.rgb :
-		color.rgb * ((PGXP_FOG != 0) ? pgxp_fog_mix(shade_color, vFog) : shade_color) * (255.0 / 128.0);
+		color.rgb * shade_color * (255.0 / 128.0);
 #ifdef FEEDBACK
 	/* HDR feedback chooses its ordinary and boosted sources while blending.
 	 * Keep modulation shared without imposing the fixed-function clamp. */
@@ -223,7 +217,7 @@ void primitive_source(out vec4 source, out bool enhanced_texel,
 	return;
 #endif
 	shade_color = primitive_color();
-	source = vec4((PGXP_FOG != 0) ? pgxp_fog_mix(shade_color, vFog) : shade_color, vColor.a);
+	source = vec4(shade_color, vColor.a);
 #endif
 
 	/* HD images arrive as ordinary normalized bytes. The low-color Vulkan

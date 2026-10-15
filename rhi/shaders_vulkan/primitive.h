@@ -12,23 +12,22 @@ layout(location = 7) flat in highp uvec3 vColorOrigin;
 layout(location = 8) flat in highp uvec3 vColorDX;
 layout(location = 9) flat in highp uvec3 vColorDY;
 layout(location = 13) flat in highp uvec2 vLine;
-#if !defined(UNSCALED)
 layout(constant_id = 3) const int SCALE = 1;
-#endif
 /* Per-primitive state carried in BufferVertex::params. Native colour depth is
  * separate from the GP0 DTD bit: DTD selects the offset matrix, while every
  * ordinary 16-bpp write is reduced to RGB5 even when DTD is clear. */
 const uint PARAM_FIXED_COLOR = 0x0004u;
 const uint PARAM_NATIVE_LINE = 0x0010u;
-const uint PARAM_STRICT_COLOR = 0x0020u;
-const uint PARAM_NATIVE_COLOR = 0x0400u;
 #ifdef TEXTURED
-/* HDR acceptance is independent of FP16 render-target availability. */
-const uint PARAM_HDR_COLOR = 0x0040u;
 const uint PARAM_FRAMEBUFFER_FEEDBACK = 0x0800u;
 #endif
-const uint PARAM_DITHER_NATIVE_RESOLUTION = 0x4000u;
 const uint PARAM_DITHER = 0x8000u;
+
+/* Global drawing policy: Native=0, expanded 16=1, 32=2, accepted HDR=3.
+ * HDR remains distinct even when its target falls back to RGBA8. */
+layout(constant_id = 9) const int PRIMITIVE_COLOR_MODE = 2;
+/* Pattern is global; GP0 DTD remains per primitive. Native=0, internal=1, off=2. */
+layout(constant_id = 11) const int DITHER_MODE = 0;
 
 #ifdef TEXTURED
      #include "vram.h"
@@ -75,17 +74,17 @@ highp vec3 framebuffer_feedback_texel5(highp vec3 color)
 
 bool primitive_strict_color()
 {
-	return (uint(vParam.z) & PARAM_STRICT_COLOR) != 0u;
+	return PRIMITIVE_COLOR_MODE == 0;
 }
 
 bool primitive_native_color()
 {
-	return (uint(vParam.z) & PARAM_NATIVE_COLOR) != 0u;
+	return PRIMITIVE_COLOR_MODE < 2;
 }
 
 void primitive_line_coverage()
 {
-	if ((uint(vParam.z) & PARAM_NATIVE_LINE) == 0u)
+	if (SCALE != 1 || (uint(vParam.z) & PARAM_NATIVE_LINE) == 0u)
 		return;
 	ivec2 first = ivec2(int(vLine.x << 16u) >> 16, int(vLine.x) >> 16);
 	ivec2 delta = ivec2(int(vLine.y << 16u) >> 16, int(vLine.y) >> 16);
@@ -114,7 +113,9 @@ void primitive_line_coverage()
 
 highp vec3 primitive_color()
 {
-	if ((uint(vParam.z) & PARAM_FIXED_COLOR) == 0u)
+	/* The CPU only builds color planes for native-color draws at 1x. */
+	if (SCALE != 1 || !primitive_native_color() ||
+		(uint(vParam.z) & PARAM_FIXED_COLOR) == 0u)
 		return vColor.rgb;
 
 	/* Native integer pixel coordinates; CPU slopes are truncated to 12
@@ -127,16 +128,15 @@ highp vec3 primitive_color()
 
 bool primitive_dither_enabled()
 {
-	return (uint(vParam.z) & PARAM_DITHER) != 0u;
+	return DITHER_MODE != 2 && (uint(vParam.z) & PARAM_DITHER) != 0u;
 }
 
 ivec2 primitive_dither_coord()
 {
 	ivec2 coord = ivec2(gl_FragCoord.xy);
-#if !defined(UNSCALED)
-	if ((uint(vParam.z) & PARAM_DITHER_NATIVE_RESOLUTION) != 0u)
+	/* UNSCALED selects the texture atlas, not the drawing resolution. */
+	if (DITHER_MODE == 0)
 		coord /= SCALE;
-#endif
 	return coord & 3;
 }
 
