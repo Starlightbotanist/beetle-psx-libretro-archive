@@ -9209,8 +9209,18 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
    offset_uv = self->scaled_uv_offset && self->render_state.primitive_type == PrimitiveType_Polygon;
 
    z = renderer_allocate_depth(self, scaled_read ? Domain_Scaled : Domain_Unscaled, &rect);
-   vram_prov_op(self, (int)rect.x, (int)rect.y,
-         (int)rect.width, (int)rect.height, 1);
+   {
+      const TTRect *clip = &self->render_state.draw_rect;
+      unsigned x0 = max_(rect.x, clip->x);
+      unsigned y0 = max_(rect.y, clip->y);
+      unsigned x1 = min_(rect.x + rect.width, clip->x + clip->width);
+      unsigned y1 = min_(rect.y + rect.height, clip->y + clip->height);
+      /* Scissored pixels are never written. Offscreen polygon bounds must
+       * not classify untouched texture pages as framebuffer feedback. */
+      if (x1 > x0 && y1 > y0)
+         vram_prov_op(self, (int)x0, (int)y0,
+               (int)(x1 - x0), (int)(y1 - y0), 1);
+   }
 
    /* Look up the hd texture index This is done here at the end of the function
     * because the `allocate_depth` call above can call `reset_queue` which would
@@ -10587,17 +10597,17 @@ static void renderer_blit_vram(Renderer *self,
    Domain domain;
    VK_ASSERT(dst->width == src->width);
    VK_ASSERT(dst->height == src->height);
-   /* Conservative provenance: the destination may now hold GPU-rendered
-    * content whether or not the source blocks were marked. */
-   vram_prov_op(self, (int)dst->x, (int)dst->y,
-         (int)dst->width, (int)dst->height, 1);
-
    /* Happens a lot in Square games for some reason. */
    if (rect_eq(dst, src))
       return;
 
    if (dst->width == 0 || dst->height == 0)
       return;
+
+   /* Real copies may carry rendered content. No-op copies above must not
+    * change provenance, including neighbouring CLUT rows in the same block. */
+   vram_prov_op(self, (int)dst->x, (int)dst->y,
+         (int)dst->width, (int)dst->height, 1);
 
 #ifndef NDEBUG
    TT_LOG_VERBOSE(RETRO_LOG_INFO,
