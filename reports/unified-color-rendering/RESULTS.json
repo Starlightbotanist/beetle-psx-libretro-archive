@@ -1,0 +1,521 @@
+{
+  "comparison": "Upstream versus PR",
+  "tested_pr_source": "e19ddf33de2983e57e485c167a0ed22dc89ce941",
+  "upstream_source": "e57860d82faa953dc0fc10f201fd583739bc2f7d",
+  "source_note": "Frozen PR core rendering-code equivalence verified against the topic; documentation-only revisions do not rebuild or relabel these binaries",
+  "workloads": {
+    "native-16": "Native textured workload: 1x, 16 bpp, native dithering",
+    "upscaled-32": "Upscaled blended workload: 4x, 32 bpp, dithering off"
+  },
+  "accepted_runs": 48,
+  "additional_repeat_runs": 8,
+  "conditions": "SDR, nearest, PGXP off, Software Framebuffer off, no MSAA/SSAA/HD/frontend shaders, interpreter at 100%",
+  "cells": [
+    {
+      "gpu": "NVIDIA",
+      "api": "gl",
+      "workload": "native-16",
+      "frames": 1200,
+      "warmup": 200,
+      "upstream": {
+        "fps": 260.86341224342857,
+        "mean_ms": 3.83342375,
+        "repeat_fps": [
+          265.8668258180935,
+          256.0448410305917
+        ],
+        "repeat_spread_percent": 3.7638494831154667,
+        "core_sha256": "8a12b3282ae5edbbdfe1dc4ae4bcd16f7d7ba48d74b2c111746a7d353e11cdb8",
+        "source_commit": "e57860d82faa953dc0fc10f201fd583739bc2f7d",
+        "initial_state_sha256": null,
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\windows\\native-16\\gl\\runs\\upstream0",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\windows\\native-16\\gl\\runs\\upstream3"
+        ]
+      },
+      "pr": {
+        "fps": 261.16645242747296,
+        "mean_ms": 3.8289757,
+        "repeat_fps": [
+          263.46029168637347,
+          258.9122114132128
+        ],
+        "repeat_spread_percent": 1.7413168749020551,
+        "core_sha256": "b0250c609eb95d8d62376839458bed027f63e7c6a663f5dc619204ad2f0e159d",
+        "source_commit": "e19ddf33de2983e57e485c167a0ed22dc89ce941",
+        "initial_state_sha256": null,
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\windows\\native-16\\gl\\runs\\pr1",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\windows\\native-16\\gl\\runs\\pr2"
+        ]
+      },
+      "fps_change_percent": 0.11616814387200858,
+      "limits": [
+        "Small difference; short-run variation limits interpretation"
+      ]
+    },
+    {
+      "gpu": "NVIDIA",
+      "api": "gl",
+      "workload": "upscaled-32",
+      "frames": 1200,
+      "warmup": 200,
+      "upstream": {
+        "fps": 208.88785006640077,
+        "mean_ms": 4.78725785,
+        "repeat_fps": [
+          209.85990235596492,
+          207.9247611776193
+        ],
+        "repeat_spread_percent": 0.9263821041099841,
+        "core_sha256": "8a12b3282ae5edbbdfe1dc4ae4bcd16f7d7ba48d74b2c111746a7d353e11cdb8",
+        "source_commit": "e57860d82faa953dc0fc10f201fd583739bc2f7d",
+        "initial_state_sha256": null,
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\windows\\upscaled-32\\gl\\runs\\upstream0",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\windows\\upscaled-32\\gl\\runs\\upstream3"
+        ]
+      },
+      "pr": {
+        "fps": 217.0214973573998,
+        "mean_ms": 4.607838449999999,
+        "repeat_fps": [
+          216.10393094995337,
+          217.94688887136599
+        ],
+        "repeat_spread_percent": 0.8491899276546873,
+        "core_sha256": "b0250c609eb95d8d62376839458bed027f63e7c6a663f5dc619204ad2f0e159d",
+        "source_commit": "e19ddf33de2983e57e485c167a0ed22dc89ce941",
+        "initial_state_sha256": null,
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\windows\\upscaled-32\\gl\\runs\\pr1",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\windows\\upscaled-32\\gl\\runs\\pr2"
+        ]
+      },
+      "fps_change_percent": 3.8937866842966296,
+      "limits": []
+    },
+    {
+      "gpu": "NVIDIA",
+      "api": "vulkan",
+      "workload": "native-16",
+      "frames": 1200,
+      "warmup": 200,
+      "upstream": {
+        "fps": 318.5274044893189,
+        "mean_ms": 3.1394472999999996,
+        "repeat_fps": [
+          315.9859870326303,
+          321.11003371559025
+        ],
+        "repeat_spread_percent": 1.608563392671058,
+        "core_sha256": "8a12b3282ae5edbbdfe1dc4ae4bcd16f7d7ba48d74b2c111746a7d353e11cdb8",
+        "source_commit": "e57860d82faa953dc0fc10f201fd583739bc2f7d",
+        "initial_state_sha256": null,
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\windows\\native-16\\vulkan\\runs\\upstream0",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\windows\\native-16\\vulkan\\runs\\upstream3"
+        ]
+      },
+      "pr": {
+        "fps": 313.34084035318654,
+        "mean_ms": 3.1914129,
+        "repeat_fps": [
+          314.8128314939764,
+          311.88255052060686
+        ],
+        "repeat_spread_percent": 0.9351532044004539,
+        "core_sha256": "b0250c609eb95d8d62376839458bed027f63e7c6a663f5dc619204ad2f0e159d",
+        "source_commit": "e19ddf33de2983e57e485c167a0ed22dc89ce941",
+        "initial_state_sha256": null,
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\windows\\native-16\\vulkan\\runs\\pr1",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\windows\\native-16\\vulkan\\runs\\pr2"
+        ]
+      },
+      "fps_change_percent": -1.6282944773457486,
+      "limits": [
+        "Small difference; short-run variation limits interpretation"
+      ]
+    },
+    {
+      "gpu": "NVIDIA",
+      "api": "vulkan",
+      "workload": "upscaled-32",
+      "frames": 6000,
+      "warmup": 1000,
+      "upstream": {
+        "fps": 198.1970623683305,
+        "mean_ms": 5.04548346,
+        "repeat_fps": [
+          198.21646489902164,
+          198.17766363572292
+        ],
+        "repeat_spread_percent": 0.019577113032501283,
+        "core_sha256": "8a12b3282ae5edbbdfe1dc4ae4bcd16f7d7ba48d74b2c111746a7d353e11cdb8",
+        "source_commit": "e57860d82faa953dc0fc10f201fd583739bc2f7d",
+        "initial_state_sha256": null,
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\windows-longer\\upscaled-32\\vulkan\\runs\\upstream0",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\windows-longer\\upscaled-32\\vulkan\\runs\\upstream3"
+        ]
+      },
+      "pr": {
+        "fps": 232.20098849446887,
+        "mean_ms": 4.3066138800000004,
+        "repeat_fps": [
+          232.00329771343394,
+          232.39901646877038
+        ],
+        "repeat_spread_percent": 0.17042066469168773,
+        "core_sha256": "b0250c609eb95d8d62376839458bed027f63e7c6a663f5dc619204ad2f0e159d",
+        "source_commit": "e19ddf33de2983e57e485c167a0ed22dc89ce941",
+        "initial_state_sha256": null,
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\windows-longer\\upscaled-32\\vulkan\\runs\\pr1",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\windows-longer\\upscaled-32\\vulkan\\runs\\pr2"
+        ]
+      },
+      "fps_change_percent": 17.156624684449294,
+      "limits": []
+    },
+    {
+      "gpu": "adreno",
+      "api": "gl",
+      "workload": "native-16",
+      "frames": 1200,
+      "warmup": 200,
+      "upstream": {
+        "fps": 134.69878904740017,
+        "mean_ms": 7.4239717155000005,
+        "repeat_fps": [
+          134.860872533368,
+          134.537094696098
+        ],
+        "repeat_spread_percent": 0.24037140339237625,
+        "core_sha256": "d7c537e887677a71423438b234b20d5a44f5fae9f5dd2dfac8f3c20d818a2649",
+        "source_commit": "e57860d82faa953dc0fc10f201fd583739bc2f7d",
+        "initial_state_sha256": "b65033f2dbf5eb8bf868f11dd4b1ab9079e6e22647dd21737cd1d0d2abda081c",
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\adreno\\runs\\adreno-performance-ff7-gl-upstream-r0-direct-upstream-pr-20261015",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\adreno\\runs\\adreno-performance-ff7-gl-upstream-r3-direct-upstream-pr-20261015"
+        ]
+      },
+      "pr": {
+        "fps": 184.98291192048748,
+        "mean_ms": 5.405904738,
+        "repeat_fps": [
+          184.82882463497288,
+          185.13725633799424
+        ],
+        "repeat_spread_percent": 0.16673512458776257,
+        "core_sha256": "c342d5c47fa869f177ca0086100fffd9f84fd89c2d4f63a80e8233a0497b201b",
+        "source_commit": "e19ddf33de2983e57e485c167a0ed22dc89ce941",
+        "initial_state_sha256": "b65033f2dbf5eb8bf868f11dd4b1ab9079e6e22647dd21737cd1d0d2abda081c",
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\adreno\\runs\\adreno-performance-ff7-gl-pr-r1-direct-upstream-pr-20261015",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\adreno\\runs\\adreno-performance-ff7-gl-pr-r2-direct-upstream-pr-20261015"
+        ]
+      },
+      "fps_change_percent": 37.33079059485267,
+      "limits": []
+    },
+    {
+      "gpu": "adreno",
+      "api": "gl",
+      "workload": "upscaled-32",
+      "frames": 2400,
+      "warmup": 400,
+      "upstream": {
+        "fps": 120.01778424247013,
+        "mean_ms": 8.332098499499999,
+        "repeat_fps": [
+          120.01648430732554,
+          120.01908420577499
+        ],
+        "repeat_spread_percent": 0.0021662609966943444,
+        "core_sha256": "d7c537e887677a71423438b234b20d5a44f5fae9f5dd2dfac8f3c20d818a2649",
+        "source_commit": "e57860d82faa953dc0fc10f201fd583739bc2f7d",
+        "initial_state_sha256": "2f70799f34c1ab3cb4e43aafc1b4c5ed5f20a93a30c8303d2e3907f501a43302",
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\adreno\\runs\\adreno-performance-silent-hill-gl-upstream-r0-direct-upstream-pr-20261015-longer",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\adreno\\runs\\adreno-performance-silent-hill-gl-upstream-r3-direct-upstream-pr-20261015-longer"
+        ]
+      },
+      "pr": {
+        "fps": 99.33790873808846,
+        "mean_ms": 10.06665041275,
+        "repeat_fps": [
+          99.18674441495803,
+          99.48953452471648
+        ],
+        "repeat_spread_percent": 0.30480751036250875,
+        "core_sha256": "c342d5c47fa869f177ca0086100fffd9f84fd89c2d4f63a80e8233a0497b201b",
+        "source_commit": "e19ddf33de2983e57e485c167a0ed22dc89ce941",
+        "initial_state_sha256": "2f70799f34c1ab3cb4e43aafc1b4c5ed5f20a93a30c8303d2e3907f501a43302",
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\adreno\\runs\\adreno-performance-silent-hill-gl-pr-r1-direct-upstream-pr-20261015-longer",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\adreno\\runs\\adreno-performance-silent-hill-gl-pr-r2-direct-upstream-pr-20261015-longer"
+        ]
+      },
+      "fps_change_percent": -17.230675965990528,
+      "limits": [
+        "One measured build clusters near 120 FPS; presentation pacing not ruled out"
+      ]
+    },
+    {
+      "gpu": "adreno",
+      "api": "vulkan",
+      "workload": "native-16",
+      "frames": 1200,
+      "warmup": 200,
+      "upstream": {
+        "fps": 231.4599747510567,
+        "mean_ms": 4.3204014045,
+        "repeat_fps": [
+          230.9754680717456,
+          231.9465183581578
+        ],
+        "repeat_spread_percent": 0.41953085611725105,
+        "core_sha256": "d7c537e887677a71423438b234b20d5a44f5fae9f5dd2dfac8f3c20d818a2649",
+        "source_commit": "e57860d82faa953dc0fc10f201fd583739bc2f7d",
+        "initial_state_sha256": "b65033f2dbf5eb8bf868f11dd4b1ab9079e6e22647dd21737cd1d0d2abda081c",
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\adreno\\runs\\adreno-performance-ff7-vulkan-upstream-r0-direct-upstream-pr-20261015",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\adreno\\runs\\adreno-performance-ff7-vulkan-upstream-r3-direct-upstream-pr-20261015"
+        ]
+      },
+      "pr": {
+        "fps": 230.13564696612823,
+        "mean_ms": 4.345263383500001,
+        "repeat_fps": [
+          229.49141880683882,
+          230.7835022612374
+        ],
+        "repeat_spread_percent": 0.5614398678947253,
+        "core_sha256": "c342d5c47fa869f177ca0086100fffd9f84fd89c2d4f63a80e8233a0497b201b",
+        "source_commit": "e19ddf33de2983e57e485c167a0ed22dc89ce941",
+        "initial_state_sha256": "b65033f2dbf5eb8bf868f11dd4b1ab9079e6e22647dd21737cd1d0d2abda081c",
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\adreno\\runs\\adreno-performance-ff7-vulkan-pr-r1-direct-upstream-pr-20261015",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\adreno\\runs\\adreno-performance-ff7-vulkan-pr-r2-direct-upstream-pr-20261015"
+        ]
+      },
+      "fps_change_percent": -0.5721627622023329,
+      "limits": [
+        "Small difference; short-run variation limits interpretation"
+      ]
+    },
+    {
+      "gpu": "adreno",
+      "api": "vulkan",
+      "workload": "upscaled-32",
+      "frames": 1200,
+      "warmup": 200,
+      "upstream": {
+        "fps": 125.36931265480875,
+        "mean_ms": 7.976433617,
+        "repeat_fps": [
+          125.31750614100989,
+          125.42116202016044
+        ],
+        "repeat_spread_percent": 0.08268040977542655,
+        "core_sha256": "d7c537e887677a71423438b234b20d5a44f5fae9f5dd2dfac8f3c20d818a2649",
+        "source_commit": "e57860d82faa953dc0fc10f201fd583739bc2f7d",
+        "initial_state_sha256": "2f70799f34c1ab3cb4e43aafc1b4c5ed5f20a93a30c8303d2e3907f501a43302",
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\adreno\\runs\\adreno-performance-silent-hill-vulkan-upstream-r0-direct-upstream-pr-20261015",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\adreno\\runs\\adreno-performance-silent-hill-vulkan-upstream-r3-direct-upstream-pr-20261015"
+        ]
+      },
+      "pr": {
+        "fps": 120.0064522645123,
+        "mean_ms": 8.332885283500001,
+        "repeat_fps": [
+          120.00848689938638,
+          120.00441769862785
+        ],
+        "repeat_spread_percent": 0.00339081831066679,
+        "core_sha256": "c342d5c47fa869f177ca0086100fffd9f84fd89c2d4f63a80e8233a0497b201b",
+        "source_commit": "e19ddf33de2983e57e485c167a0ed22dc89ce941",
+        "initial_state_sha256": "2f70799f34c1ab3cb4e43aafc1b4c5ed5f20a93a30c8303d2e3907f501a43302",
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\adreno\\runs\\adreno-performance-silent-hill-vulkan-pr-r1-direct-upstream-pr-20261015",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\adreno\\runs\\adreno-performance-silent-hill-vulkan-pr-r2-direct-upstream-pr-20261015"
+        ]
+      },
+      "fps_change_percent": -4.27764999004383,
+      "limits": [
+        "One measured build clusters near 120 FPS; presentation pacing not ruled out"
+      ]
+    },
+    {
+      "gpu": "mali",
+      "api": "gl",
+      "workload": "native-16",
+      "frames": 1200,
+      "warmup": 200,
+      "upstream": {
+        "fps": 36.845758466586545,
+        "mean_ms": 27.140165967999998,
+        "repeat_fps": [
+          37.57380709064768,
+          36.145387603255614
+        ],
+        "repeat_spread_percent": 3.8752986744446964,
+        "core_sha256": "d7c537e887677a71423438b234b20d5a44f5fae9f5dd2dfac8f3c20d818a2649",
+        "source_commit": "e57860d82faa953dc0fc10f201fd583739bc2f7d",
+        "initial_state_sha256": "b65033f2dbf5eb8bf868f11dd4b1ab9079e6e22647dd21737cd1d0d2abda081c",
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\mali\\runs\\mali-performance-ff7-gl-upstream-r0-direct-upstream-pr-20261015",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\mali\\runs\\mali-performance-ff7-gl-upstream-r3-direct-upstream-pr-20261015"
+        ]
+      },
+      "pr": {
+        "fps": 43.976552742299184,
+        "mean_ms": 22.7393903715,
+        "repeat_fps": [
+          44.11407827465392,
+          43.839882016117436
+        ],
+        "repeat_spread_percent": 0.6234995164060959,
+        "core_sha256": "c342d5c47fa869f177ca0086100fffd9f84fd89c2d4f63a80e8233a0497b201b",
+        "source_commit": "e19ddf33de2983e57e485c167a0ed22dc89ce941",
+        "initial_state_sha256": "b65033f2dbf5eb8bf868f11dd4b1ab9079e6e22647dd21737cd1d0d2abda081c",
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\mali\\runs\\mali-performance-ff7-gl-pr-r1-direct-upstream-pr-20261015",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\mali\\runs\\mali-performance-ff7-gl-pr-r2-direct-upstream-pr-20261015"
+        ]
+      },
+      "fps_change_percent": 19.35309401265053,
+      "limits": []
+    },
+    {
+      "gpu": "mali",
+      "api": "gl",
+      "workload": "upscaled-32",
+      "frames": 1200,
+      "warmup": 200,
+      "upstream": {
+        "fps": 78.60221085711048,
+        "mean_ms": 12.7222884585,
+        "repeat_fps": [
+          78.27637208363433,
+          78.93077368908351
+        ],
+        "repeat_spread_percent": 0.8325341729634623,
+        "core_sha256": "d7c537e887677a71423438b234b20d5a44f5fae9f5dd2dfac8f3c20d818a2649",
+        "source_commit": "e57860d82faa953dc0fc10f201fd583739bc2f7d",
+        "initial_state_sha256": "2f70799f34c1ab3cb4e43aafc1b4c5ed5f20a93a30c8303d2e3907f501a43302",
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\mali\\runs\\mali-performance-silent-hill-gl-upstream-r0-direct-upstream-pr-20261015",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\mali\\runs\\mali-performance-silent-hill-gl-upstream-r3-direct-upstream-pr-20261015"
+        ]
+      },
+      "pr": {
+        "fps": 80.33444018582928,
+        "mean_ms": 12.447961269,
+        "repeat_fps": [
+          79.64085186291844,
+          81.04021549889296
+        ],
+        "repeat_spread_percent": 1.7417903166196,
+        "core_sha256": "c342d5c47fa869f177ca0086100fffd9f84fd89c2d4f63a80e8233a0497b201b",
+        "source_commit": "e19ddf33de2983e57e485c167a0ed22dc89ce941",
+        "initial_state_sha256": "2f70799f34c1ab3cb4e43aafc1b4c5ed5f20a93a30c8303d2e3907f501a43302",
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\mali\\runs\\mali-performance-silent-hill-gl-pr-r1-direct-upstream-pr-20261015",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\mali\\runs\\mali-performance-silent-hill-gl-pr-r2-direct-upstream-pr-20261015"
+        ]
+      },
+      "fps_change_percent": 2.203792119623449,
+      "limits": [
+        "Small difference; short-run variation limits interpretation"
+      ]
+    },
+    {
+      "gpu": "mali",
+      "api": "vulkan",
+      "workload": "native-16",
+      "frames": 1200,
+      "warmup": 200,
+      "upstream": {
+        "fps": 133.07662396561136,
+        "mean_ms": 7.514467757,
+        "repeat_fps": [
+          132.94327832196134,
+          133.21023737629235
+        ],
+        "repeat_spread_percent": 0.200605318799298,
+        "core_sha256": "d7c537e887677a71423438b234b20d5a44f5fae9f5dd2dfac8f3c20d818a2649",
+        "source_commit": "e57860d82faa953dc0fc10f201fd583739bc2f7d",
+        "initial_state_sha256": "b65033f2dbf5eb8bf868f11dd4b1ab9079e6e22647dd21737cd1d0d2abda081c",
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\mali\\runs\\mali-performance-ff7-vulkan-upstream-r0-direct-upstream-pr-20261015",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\mali\\runs\\mali-performance-ff7-vulkan-upstream-r3-direct-upstream-pr-20261015"
+        ]
+      },
+      "pr": {
+        "fps": 132.84820488343715,
+        "mean_ms": 7.527388126,
+        "repeat_fps": [
+          133.0989903776085,
+          132.59836267340222
+        ],
+        "repeat_spread_percent": 0.3768405657471129,
+        "core_sha256": "c342d5c47fa869f177ca0086100fffd9f84fd89c2d4f63a80e8233a0497b201b",
+        "source_commit": "e19ddf33de2983e57e485c167a0ed22dc89ce941",
+        "initial_state_sha256": "b65033f2dbf5eb8bf868f11dd4b1ab9079e6e22647dd21737cd1d0d2abda081c",
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\mali\\runs\\mali-performance-ff7-vulkan-pr-r1-direct-upstream-pr-20261015",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\mali\\runs\\mali-performance-ff7-vulkan-pr-r2-direct-upstream-pr-20261015"
+        ]
+      },
+      "fps_change_percent": -0.17164478280816686,
+      "limits": [
+        "Small difference; short-run variation limits interpretation"
+      ]
+    },
+    {
+      "gpu": "mali",
+      "api": "vulkan",
+      "workload": "upscaled-32",
+      "frames": 1200,
+      "warmup": 200,
+      "upstream": {
+        "fps": 68.30901499520098,
+        "mean_ms": 14.639356167999999,
+        "repeat_fps": [
+          68.02809644357,
+          68.59226324483875
+        ],
+        "repeat_spread_percent": 0.825889790592618,
+        "core_sha256": "d7c537e887677a71423438b234b20d5a44f5fae9f5dd2dfac8f3c20d818a2649",
+        "source_commit": "e57860d82faa953dc0fc10f201fd583739bc2f7d",
+        "initial_state_sha256": "2f70799f34c1ab3cb4e43aafc1b4c5ed5f20a93a30c8303d2e3907f501a43302",
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\mali\\runs\\mali-performance-silent-hill-vulkan-upstream-r0-direct-upstream-pr-20261015",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\mali\\runs\\mali-performance-silent-hill-vulkan-upstream-r3-direct-upstream-pr-20261015"
+        ]
+      },
+      "pr": {
+        "fps": 62.05851234161951,
+        "mean_ms": 16.113824877,
+        "repeat_fps": [
+          61.43708324708665,
+          62.692641262370245
+        ],
+        "repeat_spread_percent": 2.0229772042842837,
+        "core_sha256": "c342d5c47fa869f177ca0086100fffd9f84fd89c2d4f63a80e8233a0497b201b",
+        "source_commit": "e19ddf33de2983e57e485c167a0ed22dc89ce941",
+        "initial_state_sha256": "2f70799f34c1ab3cb4e43aafc1b4c5ed5f20a93a30c8303d2e3907f501a43302",
+        "evidence": [
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\mali\\runs\\mali-performance-silent-hill-vulkan-pr-r1-direct-upstream-pr-20261015",
+          "C:\\Users\\jesse\\beetle-psx-libretro-vulkantests\\.local-test-assets\\unified-color-report-revision-20261015\\mobile\\mali\\runs\\mali-performance-silent-hill-vulkan-pr-r2-direct-upstream-pr-20261015"
+        ]
+      },
+      "fps_change_percent": -9.15033345748083,
+      "limits": []
+    }
+  ]
+}
