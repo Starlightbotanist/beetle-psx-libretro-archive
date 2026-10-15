@@ -32,7 +32,7 @@ uniform sampler2D fb_feedback_texture;
 STRINGIZE(
 uniform uint feedback_upscaling;
 
-// Scaling to apply to the dither pattern
+// Dither block size; zero disables the pattern for the whole program.
 uniform uint dither_scaling;
 // Ordinary drawing uses native RGB5 channels. Quantize explicitly
 // so OpenGL's normalized conversion cannot round a feedback value to itself.
@@ -53,10 +53,6 @@ uniform uint fixed_point_modulation;
 // additive glow ("HDR Additive Overbright"; the renderer sets this for
 // plain additive draws only).
 uniform uint hdr_hot;
-// PGXP depth cue: 1 when the option pair is on and the target is fp16.
-// The mix is the identity at frag_fog.a == 0 -- and the CPU-side per-vertex
-// mix keeps the attribute at zero, so this is a dormant hook.
-uniform uint pgxp_fog;
 
 // When 1, emit vec4(0.0) unconditionally: used by the zero-floor pass
 // that follows each subtractive batch on the fp16 target (blend
@@ -88,7 +84,6 @@ uniform ivec4 hd_texel_rect;
 uniform uint force_mask_bit;
 
 in vec3 frag_shading_color;
-in vec4 frag_fog;
 flat in uint frag_native_flags;
 )
 #if !defined(FILTER_SABR) && !defined(FILTER_XBR)
@@ -101,17 +96,8 @@ flat in uvec4 frag_native_uv;
 #endif
 STRINGIZE(
 
-// The depth-cue mix runs per vertex on the CPU in the console's own gamma
-// domain (see gpu_polygon.c); the vertex arrives with the FINISHED colour
-// and frag_fog.a == 0, so this function is the identity at runtime. It is
-// kept correct for anything that ever re-enables the attribute: the mix
-// must stay in the gamma domain -- games fade to a BLACK far colour
-// (Silent Hill: FC = 0, t -> 1), where a linearised mix turns the
-// console's (1 - t) scale into (1 - t)^(1/2.2), two to three-and-a-half
-// times too bright across the whole fade. This definition also has to sit
-// BELOW the frag_* input declarations: GLSL requires declaration before
-// use, and placing it above them is a compile error that core-profile
-// drivers reject, taking the whole renderer down with it.
+// gpu_polygon.c supplies the finished PGXP depth-cued color.
+// Only native fixed-point interpolation remains to be selected here.
 vec3 pgxp_shading() {
 )
 #if !defined(FILTER_SABR) && !defined(FILTER_XBR)
@@ -127,11 +113,7 @@ STRINGIZE(
 )
 #endif
 STRINGIZE(
-   if (pgxp_fog == 0u || frag_fog.a <= 0.)
-      return frag_shading_color;
-   return mix(max(vec3(frag_shading_color), vec3(0.)),
-              max(vec3(frag_fog.rgb), vec3(0.)),
-              clamp(frag_fog.a, 0., 1.));
+   return frag_shading_color;
 }
 // Texture page: base offset for texture lookup.
 flat in uvec2 frag_texture_page;
@@ -1135,6 +1117,18 @@ vec4 get_texel_jinc2(out float opacity)
 )
 #endif
 STRINGIZE(
+int primitive_dither_offset() {
+   // Raw textures skip DTD. Avoid coordinate division when DTD is off.
+   if (dither_scaling == 0u)
+      return 0;
+   if (frag_dither == 0u ||
+       frag_texture_blend_mode == BLEND_MODE_RAW_TEXTURE)
+      return 0;
+   uint x = (uint(gl_FragCoord.x) / dither_scaling) & 3u;
+   uint y = (uint(gl_FragCoord.y) / dither_scaling) & 3u;
+   return dither_pattern[y * 4u + x];
+}
+
 void main() {
    frag_texture_coord = smooth_texture_coord;
    if ((frag_native_flags & 4u) != 0u) {
@@ -1317,12 +1311,7 @@ STRINGIZE(
             if (fixed_point_modulation != 0u &&
                 (frag_framebuffer_feedback != 0u || native_modulation))
             {
-               uint mod_x =
-                  (uint(gl_FragCoord.x) / dither_scaling) & 3u;
-               uint mod_y =
-                  (uint(gl_FragCoord.y) / dither_scaling) & 3u;
-               float mod_dither = float(
-                  dither_pattern[mod_y * 4u + mod_x] * int(frag_dither));
+               float mod_dither = float(primitive_dither_offset());
                vec3 texel5 = floor(texel.rgb * 31. + vec3(0.5));
                vec3 shade8 = floor(clamp(pgxp_shading(), vec3(0.),
                                          vec3(1.)) * 255. + vec3(0.001));
@@ -1369,19 +1358,11 @@ STRINGIZE(
       return;
    }
 
-   // 4x4 dithering pattern scaled by `dither_scaling`
-   uint x_dither = (uint(gl_FragCoord.x) / dither_scaling) & 3U;
-   uint y_dither = (uint(gl_FragCoord.y) / dither_scaling) & 3U;
-
-   // Raw textures bypass modulation and its dither.
-   int dither_offset =
-      frag_texture_blend_mode == BLEND_MODE_RAW_TEXTURE ? 0 :
-      dither_pattern[y_dither * 4U + x_dither] * int(frag_dither);
-
    if (modulation_quantized)
       frag_color = color;
    else
    {
+      int dither_offset = primitive_dither_offset();
       float dither = float(dither_offset) / 255.;
       vec3 output_rgb = color.rgb + vec3(dither);
 

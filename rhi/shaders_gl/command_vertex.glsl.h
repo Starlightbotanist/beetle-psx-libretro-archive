@@ -30,7 +30,6 @@ in uvec2 native_uv;
 uniform ivec2 offset;
 
 out vec3 frag_shading_color;
-out vec4 frag_fog;
 flat out uvec2 frag_texture_page;
 out vec2 smooth_texture_coord;
 flat out uvec2 frag_clut;
@@ -95,7 +94,6 @@ void main() {
    /* Already in 0..1+ scale (1.0 == 0xFF). May exceed 1.0 when the PGXP
    // precise-colour path supplies the GTE's pre-saturation value. */
    frag_shading_color = uintBitsToFloat(color);
-   frag_fog = uintBitsToFloat(fog);
    frag_native_flags = native_flags;
 )
 #if !defined(FILTER_SABR) && !defined(FILTER_XBR)
@@ -113,7 +111,6 @@ STRINGIZE(
       frag_color_dy = high >> 8u;
       frag_shading_color = vec3(uvec3(fog.w, fog.w >> 8u,
             fog.w >> 16u) & 255u) / 255.0;
-      frag_fog = vec4(0.0);
    }
 )
 #endif

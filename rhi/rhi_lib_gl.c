@@ -40,7 +40,6 @@ extern int   psx_hdr_sdr_eotf;
 extern int   psx_hdr_overbright_hot;
 extern unsigned int psx_pgxp_mode;
 extern int   psx_pgxp_color;   /* PGXP precise colour: vertex colour may exceed 1.0 on fp16 */
-extern int   psx_pgxp_fog;     /* PGXP linear-light depth cue; effective only with precise colour */
 extern int   psx_src_primaries;
 
 /* fp16 render targets are core on desktop GL 3.0+; GLES3 needs an
@@ -3194,10 +3193,6 @@ static void gl_renderer_draw(gl_renderer *renderer)
       glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms,
                "feedback_upscaling"), renderer->fb_feedback_texture.id ?
                renderer->internal_upscaling : 0);
-      /* Global options and the retained target are fixed for this submission. */
-      glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms,
-               "pgxp_fog"),
-            (renderer->fb_out_fp16 && psx_pgxp_color && psx_pgxp_fog) ? 1u : 0u);
       glActiveTexture(GL_TEXTURE0);
    }
 
@@ -3930,7 +3925,8 @@ static bool gl_renderer_new(gl_renderer *renderer, gl_draw_config config)
 
    if (command_buffer->program)
    {
-      uint32_t dither_scaling = dither_mode == DITHER_UPSCALED ? 1 : upscaling;
+      uint32_t dither_scaling = dither_mode == DITHER_OFF || psx_hdr_active ? 0 :
+            (dither_mode == DITHER_UPSCALED ? 1 : upscaling);
       uint32_t native_rgb5 = depth == 16 && !psx_hdr_active;
       uint32_t fixed_point_modulation = !psx_pgxp_color;
 
@@ -5473,7 +5469,8 @@ framebuffer_ready:
 
    if (renderer->command_buffer->program)
    {
-      uint32_t dither_scaling = dither_mode == DITHER_UPSCALED ? 1 : upscaling;
+      uint32_t dither_scaling = dither_mode == DITHER_OFF || psx_hdr_active ? 0 :
+            (dither_mode == DITHER_UPSCALED ? 1 : upscaling);
       uint32_t native_rgb5 = depth == 16 && !psx_hdr_active;
       uint32_t fixed_point_modulation = !psx_pgxp_color;
 
