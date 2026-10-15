@@ -47,6 +47,13 @@ vec2 native_texture_coord()
 	return vec2((uv >> 12u) & 255u);
 }
 
+vec4 decode_vram_color(uint value)
+{
+    bool expanded = (uint(vParam.z) &
+          (PARAM_NATIVE_COLOR | PARAM_HDR_COLOR)) == 0u;
+    return abgr1555_color(value, expanded);
+}
+
 // Nearest neighbor
 vec4 sample_vram_atlas(vec2 uvv)
 {
@@ -84,7 +91,7 @@ vec4 sample_vram_atlas(vec2 uvv)
         /* 0x1000: the row was overwritten after the palette was latched;
          * the entries the GPU still holds live in uPalette. */
         if ((params.z & 0x1000) != 0)
-            return abgr1555(texelFetch(uPalette, ivec2(value, 0), 0).x);
+            return decode_vram_color(texelFetch(uPalette, ivec2(value, 0), 0).x);
 
         params.x += value;
         coord = params.xy;
@@ -97,7 +104,7 @@ vec4 sample_vram_atlas(vec2 uvv)
 #endif
 
 #if defined(UNSCALED)
-    return abgr1555(texelFetch(uFramebuffer, coord & FB_MASK, 0).x);
+    return decode_vram_color(texelFetch(uFramebuffer, coord & FB_MASK, 0).x);
 #elif defined(MSAA) && !defined(SINGLE_SAMPLE_TEXTURE)
     return texelFetch(uFramebufferMS, ivec2(mod(coord, FB_SIZE) * SCALE), gl_SampleID);
 #else

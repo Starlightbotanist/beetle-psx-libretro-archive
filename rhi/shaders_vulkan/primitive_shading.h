@@ -183,11 +183,13 @@ void primitive_source(out vec4 source, out bool enhanced_texel,
 			float md = primitive_dither_offset();
 			vec3 q5 = clamp(floor((modulated + md) / 8.0),
 				vec3(0.0), vec3(31.0));
-			/* SDR byte storage encodes the word as q*8 in every mode.
-			 * Expansion belongs to 16-bpp display; preserve HDR's existing
-			 * normalized feedback path, including its byte-target fallback. */
-			source = vec4((uint(vParam.z) & PARAM_HDR_COLOR) == 0u ?
-				q5 * (8.0 / 255.0) : q5 / 31.0,
+			/* Low-color modes retain q*8 for their display expansion.
+			 * 32 bpp and HDR use full-range colors before blending, so texture
+			 * white agrees with an untextured white background during fades. */
+			source = vec4(primitive_native_color() ?
+				q5 * (8.0 / 255.0) :
+				((uint(vParam.z) & PARAM_HDR_COLOR) == 0u ?
+					psx_expand_color5(q5) : q5 / 31.0),
 				NNColor.a + vColor.a);
 			return;
 		}

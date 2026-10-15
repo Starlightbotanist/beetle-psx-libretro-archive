@@ -3,7 +3,8 @@
 static const char *image_load_fragment = GLSL_FRAGMENT(
       uniform highp sampler2D fb_texture;
       uniform uint internal_upscaling;
-      // 1: RGB5 upload to q*8; 2: q*8 to RGB5; 3: normalized HDR colors to RGB5.
+      // 1: RGB5 upload to q*8; 2: q*8 to RGB5; 3: normalized HDR to RGB5.
+      // 4: RGB5 upload to full-range 32-bpp bytes.
       uniform uint color_conversion;
       // Uploads rebuild the derived stencil from the authoritative mask bit.
       // 0: color copy, 1: protected pixels for the stencil-only pass.
@@ -23,7 +24,11 @@ static const char *image_load_fragment = GLSL_FRAGMENT(
          discard;
       if (color_conversion == 1u)
          frag_color.rgb = floor(frag_color.rgb * 31.0 + vec3(0.5)) * (8.0 / 255.0);
-      if (color_conversion >= 2u) {
+      if (color_conversion == 4u) {
+         highp vec3 color5 = floor(frag_color.rgb * 31.0 + vec3(0.5));
+         frag_color.rgb = floor(color5 * (255.0 / 31.0) + vec3(0.5)) / 255.0;
+      }
+      else if (color_conversion >= 2u) {
          // HDR byte/float targets use the nearest RGB5 rule from CPU readback.
          // Write on that code, rather than near a driver conversion threshold.
          highp float scale = color_conversion == 2u ? 255.0 / 8.0 : 31.0;

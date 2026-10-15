@@ -6,7 +6,7 @@ static const char *output_fragment = GLSL_FRAGMENT(
    // Framebuffer sampling: 0: Normal 16bpp mode, 1: Use 24bpp mode
    uniform int depth_24bpp;
    uniform uint color_mode;
-   uniform uint unexpanded_storage;
+   uniform uint byte_color_storage;
    // Internal resolution upscaling factor. Necessary for proper 24bpp
    // display since we need to know how the pixels are laid out in RAM.
    uniform uint internal_upscaling;
@@ -21,7 +21,7 @@ static const char *output_fragment = GLSL_FRAGMENT(
    // Take a normalized color and convert it into a 16bit 1555 ABGR
    // integer in the format used internally by the Playstation GPU.
    uint rebuild_color(vec4 color) {
-      if (unexpanded_storage != 0u)
+      if (byte_color_storage != 0u)
          color.rgb = clamp(floor(color.rgb * (255.0 / 8.0) + vec3(0.001)),
                vec3(0.0), vec3(31.0)) / 31.0;
       uint a = uint(floor(color.a + 0.5));

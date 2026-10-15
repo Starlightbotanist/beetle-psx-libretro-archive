@@ -10,6 +10,13 @@ highp vec3 psx_color8(highp vec3 color)
 	return floor(color8);
 }
 
+/* Expand a five-bit code to an explicit byte. Do not leave the normalized
+ * q/31 fraction for implementation-dependent UNORM conversion. */
+highp vec3 psx_expand_color5(highp vec3 color5)
+{
+   return floor(color5 * (255.0 / 31.0) + vec3(0.5)) / 255.0;
+}
+
 /* Select native RGB5 codes; VRAM expands each code as n << 3. Dithering
  * is a signed offset in byte units, applied before RGB5 reduction. */
 highp vec3 psx_color5(highp vec3 color, highp float offset)

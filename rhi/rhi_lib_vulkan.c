@@ -5875,7 +5875,11 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
       /* Linear-light depth cueing; rides the precise-colour vertex path. */
       SpecConstIndex_PgxpFog = 9,
       /* Actual primitive render-target format, independent of HDR options. */
-      SpecConstIndex_FramebufferFloat16 = 10
+      SpecConstIndex_FramebufferFloat16 = 10,
+      /* Resolve programs use slot 8 independently of primitive PreciseColor.
+       * Canonical RGB5 uploads expand before 32-bpp drawing; rendered byte
+       * colors retain their existing values through atlas resolves. */
+      SpecConstIndex_ExpandedColor = 8
    };
 
    struct SaveState
@@ -6672,15 +6676,27 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
 #include "shaders_vulkan/prebuilt/mipmap.energy.blur.frag.inc"
       ;
 
-/* 3 LSBs are ignored. */
-#define FBCOLOR_TO_RGBA8(color) ((color) & 0xfff8f8f8u)
-
-static INLINE void fbcolor_to_rgba32f(float *v, uint32_t color)
+/* GP0 fills discard three bits before selecting the display encoding.
+ * Use the same explicit byte for a queued quad and a render-pass clear. */
+static INLINE uint32_t fbcolor_to_rgba8(uint32_t color, bool expanded)
 {
-   /* 3 LSBs are ignored. */
-   unsigned r = (color >> 0) & 0xf8;
-   unsigned g = (color >> 8) & 0xf8;
-   unsigned b = (color >> 16) & 0xf8;
+   color &= 0x00f8f8f8u;
+   if (expanded)
+   {
+      unsigned r = (((color >> 3) & 31u) * 255u + 15u) / 31u;
+      unsigned g = (((color >> 11) & 31u) * 255u + 15u) / 31u;
+      unsigned b = (((color >> 19) & 31u) * 255u + 15u) / 31u;
+      color = r | (g << 8) | (b << 16);
+   }
+   return color;
+}
+
+static INLINE void fbcolor_to_rgba32f(float *v, uint32_t color, bool expanded)
+{
+   uint32_t encoded = fbcolor_to_rgba8(color, expanded);
+   unsigned r = (encoded >> 0) & 255u;
+   unsigned g = (encoded >> 8) & 255u;
+   unsigned b = (encoded >> 16) & 255u;
    v[0] = r * (1.0f / 255.0f);
    v[1] = g * (1.0f / 255.0f);
    v[2] = b * (1.0f / 255.0f);
@@ -7238,11 +7254,11 @@ static void renderer_clear_rect(Renderer *self,
             | (((fb_color >> 11) & 0x1f) << 5)
             | (((fb_color >> 19) & 0x1f) << 10));
       texture_tracker_clearRegion(self->tracker, *rect, fill16);
-      /* A fill is GPU-produced content, though a constant is exact under
-       * either modulation path; mark it for consistency with hardware. */
-      vram_prov_op(self, (int)rect->x, (int)rect->y,
-            (int)rect->width, (int)rect->height, 1);
    }
+   /* Fills are GPU-produced VRAM even when HD texture tracking is disabled.
+    * Later feedback modulation must retain the word's RGB5 truncation. */
+   vram_prov_op(self, (int)rect->x, (int)rect->y,
+         (int)rect->width, (int)rect->height, 1);
    ih_reset(&self->last_scanout);
    fbatlas_clear_rect(&self->atlas, rect, fb_color);
 
@@ -7542,6 +7558,9 @@ static void renderer_ssaa_framebuffer(Renderer *self)
    commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode, 1);
    commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Scaling, self->scaling);
    commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_ResolveEotf, psx_hdr_sdr_eotf);
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd),
+         SpecConstIndex_ExpandedColor, !psx_hdr_active &&
+         self->render_state.color_mode == PSX_INTERNAL_COLOR_32BPP);
    commandbuffer_set_program(cbh_get(&self->cmd), self->pipelines.resolve_to_unscaled);
    commandbuffer_set_storage_texture(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer_ssaa)));
    if (self->msaa > 1)
@@ -8841,6 +8860,10 @@ static void renderer_flush_resolves(Renderer *self)
       unsigned size;
       renderer_ensure_command_buffer(self);
       commandbuffer_set_program(cbh_get(&self->cmd), self->pipelines.resolve_to_scaled);
+      commandbuffer_set_specialization_constant(cbh_get(&self->cmd),
+            SpecConstIndex_ExpandedColor, !psx_hdr_active &&
+            self->render_state.color_mode == PSX_INTERNAL_COLOR_32BPP);
+      commandbuffer_set_specialization_constant_mask(cbh_get(&self->cmd), -1);
 
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 1, image_get_view(ih_get(&self->framebuffer)), StockSampler_NearestClamp);
       if (self->msaa > 1)
@@ -8872,6 +8895,10 @@ static void renderer_flush_resolves(Renderer *self)
       commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_FilterMode, 0);
       commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Scaling, self->scaling);
       commandbuffer_set_program(cbh_get(&self->cmd), self->pipelines.resolve_to_unscaled);
+      commandbuffer_set_specialization_constant(cbh_get(&self->cmd),
+            SpecConstIndex_ExpandedColor, !psx_hdr_active &&
+            self->render_state.color_mode == PSX_INTERNAL_COLOR_32BPP);
+      commandbuffer_set_specialization_constant_mask(cbh_get(&self->cmd), -1);
       commandbuffer_set_storage_texture(cbh_get(&self->cmd), 0, 0, image_get_view(ih_get(&self->framebuffer)));
       if (self->msaa > 1)
          commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 1, image_get_view(ih_get(&self->scaled_framebuffer_msaa)), StockSampler_NearestClamp);
@@ -9868,10 +9895,9 @@ static void renderer_clear_quad(Renderer *self,
    /* BufferVertex colour is float[4] now; a positional initializer would
     * put the packed word into color[0] as a nonsense float and zero the
     * rest, so unpack it once and initialize the array explicitly. Alpha is
-    * the force-mask bit: fills never set the mask, and FBCOLOR_TO_RGBA8's
-    * old alpha byte was masked to 0xf8 anyway -- the mask semantics live in
-    * bit 15 of VRAM, produced by the fragment stage, not in this attrib. */
-   { const uint32_t fbc = FBCOLOR_TO_RGBA8(fb_color);
+    * the force-mask bit: fills always clear it. */
+   { const uint32_t fbc = fbcolor_to_rgba8(fb_color, !psx_hdr_active &&
+         self->render_state.color_mode == PSX_INTERNAL_COLOR_32BPP);
    const float fbr = (float)((fbc >>  0) & 0xFF) / 255.0f;
    const float fbg = (float)((fbc >>  8) & 0xFF) / 255.0f;
    const float fbb = (float)((fbc >> 16) & 0xFF) / 255.0f;
@@ -10069,7 +10095,8 @@ static void renderer_flush_render_pass(Renderer *self, const TTRect *rect)
    if (clear_candidate)
    {
       info.clear_depth_stencil.depth = clear_candidate->z;
-      fbcolor_to_rgba32f(info.clear_color[0].float32, clear_candidate->color);
+      fbcolor_to_rgba32f(info.clear_color[0].float32, clear_candidate->color,
+            !psx_hdr_active && self->render_state.color_mode == PSX_INTERNAL_COLOR_32BPP);
       info.clear_attachments = 1 << 0;
    }
    else

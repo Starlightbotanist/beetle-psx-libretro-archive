@@ -34,10 +34,11 @@ uniform uint feedback_upscaling;
 
 // Scaling to apply to the dither pattern
 uniform uint dither_scaling;
-// The current render target stores native RGB5 channels. Quantize explicitly
+// Ordinary drawing uses native RGB5 channels. Quantize explicitly
 // so OpenGL's normalized conversion cannot round a feedback value to itself.
 uniform uint native_rgb5;
-uniform uint unexpanded_storage;
+// SDR byte storage: full-range 32bpp or enhanced 16bpp with q*8 encoding.
+uniform uint byte_color_storage;
 uniform highp sampler2D blend_texture;
 // 0: fixed-function; 1: average; 2: add; 3: subtract; 4: quarter-add.
 uniform uint color_blend;
@@ -63,7 +64,7 @@ uniform uint pgxp_fog;
 uniform uint force_zero;
 
 // Positive values select a ceiling-only draw after the normal coverage
-// discards. HDR subtraction clamps its destination to1; enhanced16 additive
+// discards. HDR subtraction clamps its destination to1; enhanced 16 additive
 // batches clamp at248/255. Alpha and stencil are preserved by the host.
 uniform float force_ceiling;
 
@@ -164,15 +165,28 @@ const uint BLEND_MODE_TEXTURE_BLEND = 2U;
 const uint FILTER_MODE_NEAREST      = 0U;
 const uint FILTER_MODE_SABR         = 1U;
 
+vec3 expand_color5(vec3 color5) {
+   return floor(color5 * (255.0 / 31.0) + vec3(0.5)) / 255.0;
+}
+
+/* The snapshot retains byte colors for direct raw 32-bpp reads. Indexed
+ * words and modulated feedback still use their authoritative RGB5 codes. */
+bool raw_byte_feedback() {
+   return native_rgb5 == 0u && byte_color_storage != 0u &&
+         frag_depth_shift == 0u && frag_framebuffer_feedback != 0u &&
+         feedback_upscaling != 0u &&
+         frag_texture_blend_mode == BLEND_MODE_RAW_TEXTURE;
+}
+
 // Read a pixel in VRAM
 vec4 vram_get_pixel(uint x, uint y) {
   x = (x & 0x3ffU);
   y = (y & 0x1ffU);
 
-  if (frag_framebuffer_feedback != 0U && feedback_upscaling > 1U) {
+  if (frag_framebuffer_feedback != 0U && feedback_upscaling != 0U) {
      vec4 color = texelFetch(fb_feedback_texture,
            ivec2(x, y) * int(feedback_upscaling), 0);
-     if (unexpanded_storage != 0u)
+     if (byte_color_storage != 0u)
         color.rgb = clamp(floor(color.rgb * (255.0 / 8.0) +
               vec3(0.001)), vec3(0.0), vec3(31.0)) / 31.0;
      return color;
@@ -201,6 +215,10 @@ STRINGIZE(
 // want black you have to use an opaque draw command and use `0x8000`
 // instead.
 bool is_transparent(vec4 texel) {
+  // SDR samples are exact RGB5 or byte codes. Test zero directly without
+  // rounding small 32-bpp colors away; retain the existing HDR word policy.
+  if (native_rgb5 != 0u || byte_color_storage != 0u)
+     return all(equal(texel, vec4(0.0)));
   return rebuild_psx_color(texel) == 0U;
 }
 
@@ -416,7 +434,7 @@ STRINGIZE(
 
    vec4 texel;
    if (frag_depth_shift == 0U && frag_framebuffer_feedback != 0U &&
-       feedback_upscaling > 1U)
+       feedback_upscaling != 0U)
    {
       vec2 feedback_phase = clamp(coords, vec2(0.0), vec2(255.0));
       feedback_phase = clamp(feedback_phase, vec2(frag_texture_limits.xy),
@@ -425,7 +443,8 @@ STRINGIZE(
             fract(feedback_phase);
       texel = texelFetch(fb_feedback_texture,
             ivec2(feedback_coord * float(feedback_upscaling)), 0);
-      if (unexpanded_storage != 0u)
+      if (byte_color_storage != 0u &&
+          !raw_byte_feedback())
          texel.rgb = clamp(floor(texel.rgb * (255.0 / 8.0) +
                vec3(0.001)), vec3(0.0), vec3(31.0)) / 31.0;
    }
@@ -471,8 +490,12 @@ STRINGIZE(
    // RGB5 texture sampling may use bit replication. Recover the exact
    // normalized level before filtering or modulation, rather than letting
    // that conversion error choose the neighboring source code.
-   if (native_rgb5 != 0u || unexpanded_storage != 0u)
+   if (native_rgb5 != 0u)
       texel.rgb = floor(texel.rgb * 31.0 + vec3(0.5)) / 31.0;
+   /* Choose the expanded byte before modulation: shade 128 must copy the
+    * same color as a raw draw. Snapshot byte colors already have that code. */
+   else if (byte_color_storage != 0u && !raw_byte_feedback())
+      texel.rgb = expand_color5(floor(texel.rgb * 31.0 + vec3(0.5)));
 )
 #ifdef HAVE_OPENGLES3
 STRINGIZE(
@@ -1281,13 +1304,12 @@ STRINGIZE(
             if (native_rgb5 != 0u) {
                if (!enhanced_texel) {
                   vec3 q5 = floor(texel.rgb * 31.0 + vec3(0.5));
-                  color.rgb = unexpanded_storage != 0u ?
+                  color.rgb = byte_color_storage != 0u ?
                         q5 * (8.0 / 255.0) : q5 / 31.0;
                   modulation_quantized = true;
-               } else if (!hd_texel || unexpanded_storage != 0u)
+               } else if (!hd_texel || byte_color_storage != 0u)
                   color.rgb *= 248.0 / 255.0;
-            } else if (unexpanded_storage != 0u && !hd_texel)
-               color.rgb *= 248.0 / 255.0;
+            }
          } else /* BLEND_MODE_TEXTURE_BLEND */ {
             /* Native nearest texels use the same integer colour levels as
              * framebuffer feedback. Keep filtered and HD samples on their
@@ -1312,18 +1334,21 @@ STRINGIZE(
                 * truncation, and clamps the result to a 5-bit channel. */
                vec3 q5 = clamp(floor((modulated + mod_dither) / 8.),
                                   vec3(0.), vec3(31.));
-               color = vec4(unexpanded_storage != 0u ?
-                     q5 * (8.0 / 255.0) : q5 / 31.0, mask_bit);
+               vec3 quantized = native_rgb5 != 0u && byte_color_storage != 0u ?
+                     q5 * (8.0 / 255.0) : q5 / 31.0;
+               if (native_rgb5 == 0u && byte_color_storage != 0u)
+                  quantized = expand_color5(q5);
+               color = vec4(quantized, mask_bit);
                modulation_quantized = true;
             }
             else
             {
-               // GP0 shade 128 is neutral. SDR uses byte-domain VRAM
-               // levels (q*8), including in 32 bpp; HD images already carry
-               // byte colors. Active HDR keeps its existing wide path.
-               if (native_rgb5 != 0u || unexpanded_storage != 0u) {
+               // GP0 shade 128 is neutral. Low-color SDR uses q*8; 32 bpp
+               // keeps the cache's full-range expansion before blending.
+               // HD images and active HDR retain their existing byte colors.
+               if (native_rgb5 != 0u || byte_color_storage != 0u) {
                   vec3 source = texel.rgb;
-                  if (!hd_texel || (native_rgb5 != 0u && unexpanded_storage != 0u))
+                  if (native_rgb5 != 0u && (!hd_texel || byte_color_storage != 0u))
                      source *= 248.0 / 255.0;
                   color = vec4(pgxp_shading() * (255.0 / 128.0) * source, mask_bit);
                } else
@@ -1338,7 +1363,7 @@ STRINGIZE(
          // over-white additive sources on the fp16 target.
          // SDR saturation follows source dithering below. Clamping a hot
          // source first would darken saturated pixels at negative dither taps.
-         if (hdr_hot == 0u && native_rgb5 == 0u && unexpanded_storage == 0u)
+         if (hdr_hot == 0u && native_rgb5 == 0u && byte_color_storage == 0u)
             color.rgb = min(color.rgb, vec3(1.));
       }
 
@@ -1372,15 +1397,15 @@ STRINGIZE(
        * conversion and can turn a channel into n - 1. Let the RGB5
        * attachment round it back to the same hardware value instead. */
       if (native_rgb5 != 0u &&
-          (!enhanced_texel || unexpanded_storage == 0u))
+          (!enhanced_texel || byte_color_storage == 0u))
       {
          vec3 q5 = clamp(floor((color.rgb * 255.0 +
                vec3(float(dither_offset)) + vec3(0.001)) / 8.0),
                vec3(0.0), vec3(31.0));
-         output_rgb = unexpanded_storage != 0u ?
+         output_rgb = byte_color_storage != 0u ?
                q5 * (8.0 / 255.0) : q5 / 31.0;
       }
-      else if (unexpanded_storage != 0u) {
+      else if (byte_color_storage != 0u) {
          if (native_rgb5 != 0u)
             output_rgb = clamp(output_rgb, vec3(0.0), vec3(248.0 / 255.0));
          if (frag_texture_blend_mode != BLEND_MODE_RAW_TEXTURE)
@@ -1392,7 +1417,7 @@ STRINGIZE(
    }
    // Match the byte source presented to fixed and explicit blends. Native
    // RGB5 and HDR keep their existing source rules.
-   if (unexpanded_storage != 0u && enhanced_texel &&
+   if (byte_color_storage != 0u && enhanced_texel &&
        frag_texture_blend_mode == BLEND_MODE_RAW_TEXTURE)
       frag_color.rgb = floor(max(frag_color.rgb, vec3(0.0)) *
             255.0 + vec3(0.5)) / 255.0;

@@ -146,7 +146,11 @@ void main()
 		#endif
 	#else
 		uint value = textureLod(uTexture, vUV, 0.0).x;
+		#if defined(HDR)
 		rgb = abgr1555(value).rgb;
+		#else
+		rgb = abgr1555_color(value, COLOR_MODE == 2).rgb;
+		#endif
 	#endif
 #endif
 
