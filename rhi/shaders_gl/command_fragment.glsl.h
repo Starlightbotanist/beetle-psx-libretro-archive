@@ -23,10 +23,12 @@ uniform sampler2D palette_texture;
 #ifdef HAVE_OPENGLES3
 STRINGIZE(
 uniform highp sampler2D fb_feedback_texture;
+uniform highp sampler2D blend_texture;
 )
 #else
 STRINGIZE(
 uniform sampler2D fb_feedback_texture;
+uniform sampler2D blend_texture;
 )
 #endif
 STRINGIZE(
@@ -37,6 +39,8 @@ uniform uint dither_scaling;
 // The current render target stores native RGB5 channels. Quantize explicitly
 // so OpenGL's normalized conversion cannot round a feedback value to itself.
 uniform uint native_rgb5;
+// 1: average using a destination snapshot; 2: truncate quarter source.
+uniform uint native_blend;
 // Reproduce the GPU's fixed-point texture modulation when precise PGXP
 // colour is disabled.
 uniform uint fixed_point_modulation;
@@ -86,10 +90,11 @@ in vec4 frag_fog;
 )
 #if !defined(FILTER_SABR) && !defined(FILTER_XBR)
 STRINGIZE(
-flat in uint frag_native_color_plane;
+flat in uint frag_native_flags;
 flat in uvec3 frag_color_origin;
 flat in uvec3 frag_color_dx;
 flat in uvec3 frag_color_dy;
+flat in uvec4 frag_native_uv;
 )
 #endif
 STRINGIZE(
@@ -109,7 +114,7 @@ vec3 pgxp_shading() {
 )
 #if !defined(FILTER_SABR) && !defined(FILTER_XBR)
 STRINGIZE(
-   if (frag_native_color_plane != 0u) {
+   if ((frag_native_flags & 1u) != 0u) {
       // Primitive passes use a zero-origin, full-VRAM viewport. Scissors
       // clip drawing without changing these integer VRAM coordinates.
       uvec2 coord = uvec2(gl_FragCoord.xy);
@@ -129,7 +134,8 @@ STRINGIZE(
 // Texture page: base offset for texture lookup.
 flat in uvec2 frag_texture_page;
 // Texel coordinates within the page. Interpolated by OpenGL.
-in vec2 frag_texture_coord;
+in vec2 smooth_texture_coord;
+vec2 frag_texture_coord;
 // Clut coordinates in VRAM
 flat in uvec2 frag_clut;
 // 0: no texture, 1: raw-texture, 2: blended
@@ -1083,6 +1089,47 @@ vec4 get_texel_jinc2(out float opacity)
 #endif
 STRINGIZE(
 void main() {
+   frag_texture_coord = smooth_texture_coord;
+)
+#if !defined(FILTER_SABR) && !defined(FILTER_XBR)
+STRINGIZE(
+   if ((frag_native_flags & 4u) != 0u) {
+      ivec2 first = ivec2(int(frag_native_uv.x << 16u) >> 16,
+            int(frag_native_uv.x) >> 16);
+      ivec2 delta = ivec2(int(frag_native_uv.y << 16u) >> 16,
+            int(frag_native_uv.y) >> 16);
+      ivec2 coord = ivec2(gl_FragCoord.xy);
+      int steps = max(abs(delta.x), abs(delta.y));
+      bool horizontal = abs(delta.x) > abs(delta.y);
+      int major = horizontal ? coord.x - first.x : coord.y - first.y;
+      int direction = horizontal ? delta.x : delta.y;
+      int k = direction < 0 ? -major : major;
+      if (k < 0 || k > steps)
+         discard;
+      int minor = horizontal ? first.y : first.x;
+      if (steps != 0) {
+         int d = horizontal ? delta.y : delta.x;
+         // X ties round down. Y ties round down only when descending.
+         int n = 2 * d * k + steps - ((!horizontal || d < 0) ? 1 : 0);
+         int divisor = 2 * steps;
+         minor += (n - (n < 0 ? divisor - 1 : 0)) / divisor;
+      }
+      if ((horizontal ? coord.y : coord.x) != minor)
+         discard;
+   }
+   if ((frag_native_flags & 2u) != 0u) {
+      uvec2 low = frag_native_uv.xz;
+      uvec2 high = frag_native_uv.yw;
+      uvec2 origin = low & 0xfffffu;
+      uvec2 dx = (low >> 20u) | ((high & 0xffu) << 12u);
+      uvec2 dy = high >> 8u;
+      uvec2 coord = uvec2(gl_FragCoord.xy);
+      frag_texture_coord = vec2(((origin + coord.x * dx +
+            coord.y * dy) >> 12u) & 255u);
+   }
+)
+#endif
+STRINGIZE(
    if (force_zero != 0u) {
       frag_color = vec4(0.);
       return;
@@ -1275,6 +1322,32 @@ STRINGIZE(
                       31.;
 
       frag_color = vec4(output_rgb, color.a);
+   }
+   if (native_blend != 0u) {
+      uvec3 source = uvec3(floor(clamp(frag_color.rgb, vec3(0.0),
+            vec3(1.0)) * 31.0 + vec3(0.5)));
+      if (native_blend == 3u) {
+)
+#ifdef HAVE_OPENGLES3
+STRINGIZE(
+         // Scale before blending to avoid rounding the source twice.
+         frag_color.rgb = vec3(source) / 62.0 - vec3(5.0 / 992.0);
+)
+#else
+STRINGIZE(
+         frag_color.rgb = vec3(source) / 31.0;
+)
+#endif
+STRINGIZE(
+         return;
+      }
+      if (native_blend == 1u) {
+         uvec3 destination = uvec3(floor(texelFetch(blend_texture,
+               ivec2(gl_FragCoord.xy), 0).rgb * 31.0 + vec3(0.5)));
+         source = (source + destination) >> 1u;
+      } else
+         source >>= 2u;
+      frag_color.rgb = vec3(source) / 31.0;
    }
 }
 );

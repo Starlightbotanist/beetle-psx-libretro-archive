@@ -721,16 +721,18 @@ struct gl_command_vertex {
    uint8_t framebuffer_feedback;
    /* Read indexed colors from the retained CLUT instead of live VRAM. */
    uint8_t palette_cached;
-   /* Packed native RGB planes use the otherwise unused precise-colour
-    * lanes. This byte occupies existing padding before fog. */
-   uint8_t native_color_plane;
+   /* Native payload flags: 1 RGB plane, 2 UV plane, 4 line coverage,
+    * 8 integer pixel origin.
+    * This byte occupies existing padding before fog. */
+   uint8_t native_flags;
    /* Depth-cue sidecar: far colour (1.0 == 0xFF) in [0..2], blend factor in
     * [3]. t == 0 makes the shader mix the identity, so vertices without a
-    * recovered cue cost nothing. KEEP LAST -- positional initializers above
-    * omit trailing fields and zero-fill them, which is exactly what a
-    * cue-less vertex wants; a field inserted mid-struct shifts every
-    * initializer after it (see the Vertex struct in rhi_lib_vulkan.c). */
+    * recovered cue cost nothing. Positional initializers omit these trailing
+    * fields and zero-fill them. Append new payloads rather than shifting
+    * existing initializer fields. */
    float fog[4];
+   /* Native UV planes, or endpoints for native line coverage. */
+   uint32_t native_uv[2];
 };
 typedef struct gl_command_vertex gl_command_vertex;
 
@@ -829,6 +831,10 @@ struct gl_primitive_batch {
     * Batches split whenever the handle changes so the flush loop can
     * bind one replacement texture + uniform set per batch. */
    HdTextureHandle hd;
+   /* Average blending must truncate after adding source and destination.
+    * Keep each such primitive separate, with its bounded snapshot region. */
+   bool native_average;
+   GLint blend_rect[4];
 };
 typedef struct gl_primitive_batch gl_primitive_batch;
 
@@ -2774,17 +2780,77 @@ static void gl_palette_cache_preserve(gl_renderer *renderer,
 }
 #endif
 
+/* Shared conservative bounds for VRAM hazards and blend snapshots. Queued
+ * UV payloads may pack integral XY; decode them before inspecting geometry. */
+static void gl_primitive_draw_rect(const gl_renderer *renderer,
+      const gl_command_vertex *v, unsigned vertices, GLint rect[4])
+{
+   float min_x = (float)VRAM_WIDTH_PIXELS, min_y = (float)VRAM_HEIGHT;
+   float max_x = 0.0f, max_y = 0.0f;
+   int x0, y0, x1, y1;
+   unsigned i;
+
+   for (i = 0; i < vertices; i++)
+   {
+      float px = v[i].position[0], py = v[i].position[1];
+      if (v[i].native_flags & 2)
+      {
+         uint32_t xy;
+         memcpy(&xy, v[i].position, sizeof(xy));
+         px = (float)(int16_t)(xy & 0xffffu);
+         py = (float)(int16_t)(xy >> 16);
+      }
+      px += renderer->config.draw_offset[0];
+      py += renderer->config.draw_offset[1];
+      if (px < min_x)
+         min_x = px;
+      if (px > max_x)
+         max_x = px;
+      if (py < min_y)
+         min_y = py;
+      if (py > max_y)
+         max_y = py;
+   }
+   /* Clamp before float-to-integer conversion, including enhanced vertices
+    * outside VRAM. A zero-width/height primitive can still be a line. */
+   if (min_x < 0.0f)
+      min_x = 0.0f;
+   if (min_y < 0.0f)
+      min_y = 0.0f;
+   if (max_x > VRAM_WIDTH_PIXELS)
+      max_x = (float)VRAM_WIDTH_PIXELS;
+   if (max_y > VRAM_HEIGHT)
+      max_y = (float)VRAM_HEIGHT;
+   x0 = (int)floorf(min_x);
+   y0 = (int)floorf(min_y);
+   x1 = (int)ceilf(max_x);
+   y1 = (int)ceilf(max_y);
+   if (x1 == x0)
+      x1++;
+   if (y1 == y0)
+      y1++;
+   if (x0 < renderer->config.draw_area_top_left[0])
+      x0 = renderer->config.draw_area_top_left[0];
+   if (y0 < renderer->config.draw_area_top_left[1])
+      y0 = renderer->config.draw_area_top_left[1];
+   if (x1 > renderer->config.draw_area_bot_right[0])
+      x1 = renderer->config.draw_area_bot_right[0];
+   if (y1 > renderer->config.draw_area_bot_right[1])
+      y1 = renderer->config.draw_area_bot_right[1];
+   if (x1 > VRAM_WIDTH_PIXELS)
+      x1 = VRAM_WIDTH_PIXELS;
+   if (y1 > VRAM_HEIGHT)
+      y1 = VRAM_HEIGHT;
+   rect[0] = x0;
+   rect[1] = y0;
+   rect[2] = x1 > x0 ? x1 - x0 : 0;
+   rect[3] = y1 > y0 ? y1 - y0 : 0;
+}
+
 static void gl_vram_sync_primitive(gl_renderer *renderer,
       gl_command_vertex *v, unsigned vertices)
 {
-   float min_x;
-   float min_y;
-   float max_x;
-   float max_y;
-   int x0;
-   int y0;
-   int x1;
-   int y1;
+   GLint rect[4];
    unsigned i;
    bool framebuffer_feedback = false;
 
@@ -2900,44 +2966,11 @@ static void gl_vram_sync_primitive(gl_renderer *renderer,
    }
 #endif
 
-   min_x = max_x = v[0].position[0] + renderer->config.draw_offset[0];
-   min_y = max_y = v[0].position[1] + renderer->config.draw_offset[1];
-   for (i = 1; i < vertices; i++)
+   gl_primitive_draw_rect(renderer, v, vertices, rect);
+   if (rect[2] && rect[3])
    {
-      float px = v[i].position[0] + renderer->config.draw_offset[0];
-      float py = v[i].position[1] + renderer->config.draw_offset[1];
-      if (px < min_x) min_x = px;
-      if (px > max_x) max_x = px;
-      if (py < min_y) min_y = py;
-      if (py > max_y) max_y = py;
-   }
-
-   x0 = (int)floorf(min_x);
-   y0 = (int)floorf(min_y);
-   x1 = (int)ceilf(max_x);
-   y1 = (int)ceilf(max_y);
-   if (x1 == x0) x1++;
-   if (y1 == y0) y1++;
-
-   if (x0 < (int)renderer->config.draw_area_top_left[0])
-      x0 = renderer->config.draw_area_top_left[0];
-   if (y0 < (int)renderer->config.draw_area_top_left[1])
-      y0 = renderer->config.draw_area_top_left[1];
-   if (x1 > (int)renderer->config.draw_area_bot_right[0])
-      x1 = renderer->config.draw_area_bot_right[0];
-   if (y1 > (int)renderer->config.draw_area_bot_right[1])
-      y1 = renderer->config.draw_area_bot_right[1];
-   if (x0 < 0) x0 = 0;
-   if (y0 < 0) y0 = 0;
-   if (x1 > VRAM_WIDTH_PIXELS) x1 = VRAM_WIDTH_PIXELS;
-   if (y1 > VRAM_HEIGHT) y1 = VRAM_HEIGHT;
-
-   if (x1 > x0 && y1 > y0)
-   {
-      gl_palette_cache_preserve(renderer, (unsigned)x0, (unsigned)y0,
-            (unsigned)(x1 - x0), (unsigned)(y1 - y0));
-      gl_vram_sync_mark_rect(renderer, (unsigned)x0, (unsigned)y0,
-            (unsigned)(x1 - x0), (unsigned)(y1 - y0));
+      gl_palette_cache_preserve(renderer, rect[0], rect[1], rect[2], rect[3]);
+      gl_vram_sync_mark_rect(renderer, rect[0], rect[1], rect[2], rect[3]);
    }
 
    for (i = 0; i < vertices; i++)
@@ -3018,6 +3051,8 @@ static gl_draw_buffer *gl_draw_buffer_build(const char *vertex_shader_src,
 static void gl_renderer_draw(gl_renderer *renderer)
 {
    gl_framebuffer _fb;
+   gl_texture blend_texture = {0};
+   bool blend_snapshot_failed = false;
    int16_t x;
    int16_t y;
    size_t bi;
@@ -3113,6 +3148,33 @@ static void gl_renderer_draw(gl_renderer *renderer)
          GLenum blend_func = GL_FUNC_ADD;
          GLenum blend_src = GL_CONSTANT_ALPHA;
          GLenum blend_dst = GL_CONSTANT_ALPHA;
+         /* Diagnostic only: fixed-function compensation, no destination read. */
+         bool native_average = false;
+         bool compensated_average = !it->opaque && it->native_average;
+         bool native_quarter = !it->opaque &&
+               renderer->internal_color_depth == 16 && !renderer->fb_out_fp16 &&
+               it->transparency_mode == SEMI_TRANSPARENCY_MODE_ADD_QUARTER_SOURCE;
+
+         if (native_average && !blend_texture.id)
+         {
+            GLint immutable_format = GL_FALSE;
+            glActiveTexture(GL_TEXTURE4);
+            gl_texture_init(&blend_texture, renderer->fb_out.width,
+                  renderer->fb_out.height, GL_RGB5_A1);
+            glGetTexParameteriv(GL_TEXTURE_2D,
+                  GL_TEXTURE_IMMUTABLE_FORMAT, &immutable_format);
+            glActiveTexture(GL_TEXTURE0);
+            if (immutable_format != GL_TRUE)
+            {
+               glDeleteTextures(1, &blend_texture.id);
+               blend_texture.id = 0;
+               native_average = false;
+               blend_snapshot_failed = true;
+               log_cb(RETRO_LOG_WARN,
+                     "[OpenGL] Blend snapshot allocation failed; "
+                     "using fixed-function averaging.\n");
+            }
+         }
 
          /* Mask bits */
          if (it->set_mask)
@@ -3131,6 +3193,10 @@ static void gl_renderer_draw(gl_renderer *renderer)
       {
          glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "draw_semi_transparent"), !opaque);
          glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "force_mask_bit"), it->force_mask ? 1u : 0u);
+         glUniform1i(gl_uniform_map_get(&renderer->command_buffer->program->uniforms,
+                  "blend_texture"), 4);
+         glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms,
+                  "native_blend"), compensated_average ? 3u : native_average ? 1u : native_quarter ? 2u : 0u);
          /* "HDR Additive Overbright": skip the source clamp for plain
           * additive draws on the fp16 target only, matching the Vulkan
           * renderer (primitive.frag gates hot on BLEND_ADD). */
@@ -3147,7 +3213,20 @@ static void gl_renderer_draw(gl_renderer *renderer)
          glUniform1ui(gl_uniform_map_get(&renderer->command_buffer->program->uniforms, "pgxp_fog"),
                (renderer->fb_out_fp16 && psx_pgxp_color && psx_pgxp_fog) ? 1u : 0u);
       }
-      if (opaque)
+      if (compensated_average)
+      {
+#ifdef HAVE_OPENGLES3
+         /* The ES shader has already halved the source color. */
+         glBlendColor(251.0f / 512.0f, 251.0f / 512.0f,
+               251.0f / 512.0f, 1.0f);
+#else
+         glBlendColor(125.0f / 256.0f, 125.0f / 256.0f,
+               125.0f / 256.0f, 125.0f / 256.0f);
+#endif
+      }
+      else
+         glBlendColor(0.25f, 0.25f, 0.25f, 0.5f);
+      if (opaque || native_average)
          glDisable(GL_BLEND);
       else
       {
@@ -3160,7 +3239,7 @@ static void gl_renderer_draw(gl_renderer *renderer)
                blend_func = GL_FUNC_ADD;
                /* Set to 0.5 with glBlendColor */
                blend_src = GL_CONSTANT_ALPHA;
-               blend_dst = GL_CONSTANT_ALPHA;
+               blend_dst = compensated_average ? GL_CONSTANT_COLOR : GL_CONSTANT_ALPHA;
                break;
             /* 1.0xB + 1.0 x F */
             case SEMI_TRANSPARENCY_MODE_ADD:
@@ -3176,7 +3255,7 @@ static void gl_renderer_draw(gl_renderer *renderer)
                break;
             case SEMI_TRANSPARENCY_MODE_ADD_QUARTER_SOURCE:
                blend_func = GL_FUNC_ADD;
-               blend_src = GL_CONSTANT_COLOR;
+               blend_src = native_quarter ? GL_ONE : GL_CONSTANT_COLOR;
                blend_dst = GL_ONE;
                break;
          }
@@ -3248,8 +3327,30 @@ static void gl_renderer_draw(gl_renderer *renderer)
             glBlendEquationSeparate(blend_func, GL_FUNC_ADD);
          }
 
-         glDrawElements(it->draw_mode, it->count, GL_UNSIGNED_SHORT,
-                        (GLvoid*)(it->first * sizeof(GLushort)));
+         if (native_average)
+         {
+            unsigned first, stride = it->draw_mode == GL_LINES ? 2 : 3;
+            GLint read_fb;
+            glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_fb);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, _fb.id);
+            glActiveTexture(GL_TEXTURE4);
+            glBindTexture(GL_TEXTURE_2D, blend_texture.id);
+            for (first = it->first; first < it->first + it->count; first += stride)
+            {
+               if (it->blend_rect[2] > 0 && it->blend_rect[3] > 0)
+                  glCopyTexSubImage2D(GL_TEXTURE_2D, 0,
+                        it->blend_rect[0], it->blend_rect[1],
+                        it->blend_rect[0], it->blend_rect[1],
+                        it->blend_rect[2], it->blend_rect[3]);
+               glDrawElements(it->draw_mode, stride, GL_UNSIGNED_SHORT,
+                     (GLvoid*)(first * sizeof(GLushort)));
+            }
+            glActiveTexture(GL_TEXTURE0);
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read_fb);
+         }
+         else
+            glDrawElements(it->draw_mode, it->count, GL_UNSIGNED_SHORT,
+                           (GLvoid*)(it->first * sizeof(GLushort)));
 
          /* Zero-floor pass for subtractive blending on the fp16 target.
           * GL_FUNC_REVERSE_SUBTRACT clamps at zero on a UNORM attachment
@@ -3298,6 +3399,7 @@ static void gl_renderer_draw(gl_renderer *renderer)
    renderer->force_mask = false;
 
    glDeleteFramebuffers(1, &_fb.id);
+   glDeleteTextures(1, &blend_texture.id);
 }
 
 static void gl_renderer_upload_textures(
@@ -5312,6 +5414,7 @@ static void vertex_preprocessing(
    bool buffer_full;
    bool index_full;
    bool unmapped;
+   bool native_average;
 
    if (!renderer)
       return;
@@ -5324,6 +5427,9 @@ static void vertex_preprocessing(
     * ones. Only untextured semi-transparent triangles don't need to be
     * drawn as opaque. */
    is_opaque   = !is_semi_transparent || is_textured;
+   native_average = is_semi_transparent &&
+         stm == SEMI_TRANSPARENCY_MODE_AVERAGE &&
+         renderer->internal_color_depth == 16 && !renderer->fb_out_fp16;
    buffer_full = gl_draw_buffer_remaining_capacity(renderer->command_buffer) < count;
    /* Index space is tracked separately from vertex space: a quad
     * occupies four vertices but six indices, so the two run out at
@@ -5391,6 +5497,15 @@ static void vertex_preprocessing(
       batch.first = renderer->vertex_index_pos;
       batch.count = 0;
       batch.hd = hd;
+      batch.native_average = native_average;
+      memset(batch.blend_rect, 0, sizeof(batch.blend_rect));
+      if (native_average)
+      {
+         unsigned i;
+         gl_primitive_draw_rect(renderer, v, count, batch.blend_rect);
+         for (i = 0; i < 4; i++)
+            batch.blend_rect[i] *= renderer->internal_upscaling;
+      }
       gl_primitive_batch_vec_push(&renderer->batches, &batch);
 
       renderer->semi_transparency_mode = stm;
@@ -5422,6 +5537,8 @@ static void vertex_add_blended_pass(
       batch.first = vertex_index;
       batch.count = 0;
       batch.hd = last->hd;
+      batch.native_average = last->native_average;
+      memcpy(batch.blend_rect, last->blend_rect, sizeof(batch.blend_rect));
       gl_primitive_batch_vec_push(&renderer->batches, &batch);
 
       renderer->opaque = false;
@@ -5438,10 +5555,10 @@ static void gl_set_native_color_plane(gl_command_vertex *v,
    memcpy(v->color, planes, 3 * sizeof(uint32_t));
    memcpy(v->fog, planes + 3, 3 * sizeof(uint32_t));
    memcpy(v->fog + 3, &color, sizeof(color));
-   v->native_color_plane = 1;
+   v->native_flags |= 1;
 }
 
-static bool gl_native_color_positions(const gl_renderer *renderer,
+static bool gl_native_positions(const gl_renderer *renderer,
       const gl_command_vertex *v, unsigned count, HdTextureHandle hd,
       int32_t *x, int32_t *y)
 {
@@ -5449,7 +5566,7 @@ static bool gl_native_color_positions(const gl_renderer *renderer,
    if (renderer->internal_color_depth != 16 || renderer->fb_out_fp16 ||
        renderer->internal_upscaling != 1 || psx_pgxp_mode != 0 ||
        psx_pgxp_color || renderer->filter_type != FILTER_MODE_NEAREST ||
-       !hd_handle_is_none(&hd) || v[0].texture_blend_mode == 1)
+       !hd_handle_is_none(&hd))
       return false;
    for (i = 0; i < count; i++)
    {
@@ -5470,22 +5587,47 @@ static bool gl_native_color_positions(const gl_renderer *renderer,
 /* Queued GP0 colours and draw-offset-adjusted positions are authoritative.
  * The wrapped 8.12 planes travel with the primitive; no side state survives
  * a flush, reset or savestate restore. Flat colours need no plane. */
-static void gl_build_native_triangle_colors(gl_renderer *renderer,
+static void gl_build_native_triangle_interpolants(gl_renderer *renderer,
       gl_command_vertex *v, const uint32_t *colors, HdTextureHandle hd)
 {
    int32_t x[3], y[3];
    int64_t denom;
    uint32_t planes[6];
    unsigned i, c, anchor;
-   if (colors[0] == colors[1] && colors[0] == colors[2])
+   if (!gl_native_positions(renderer, v, 3, hd, x, y))
       return;
-   if (!gl_native_color_positions(renderer, v, 3, hd, x, y))
-      return;
+   for (i = 0; i < 3; i++)
+      v[i].native_flags |= 8;
    denom = (int64_t)(x[1] - x[0]) * (y[2] - y[1]) -
          (int64_t)(x[2] - x[1]) * (y[1] - y[0]);
    if (!denom)
       return;
    anchor = rhi_triangle_anchor(x);
+   if (v[0].texture_blend_mode != 0)
+   {
+      for (c = 0; c < 2; c++)
+      {
+         int32_t value[3];
+         for (i = 0; i < 3; i++)
+            value[i] = v[i].texture_coord[c];
+         rhi_triangle_interpolant(planes + c * 2,
+               x, y, value, denom, anchor);
+      }
+      {
+         /* As in Vulkan, signed integral XY share one word; Y/W carry
+          * the first UV plane. Depth and original UVs remain untouched. */
+         uint32_t xy = (uint16_t)(int32_t)v[2].position[0] |
+               ((uint32_t)(uint16_t)(int32_t)v[2].position[1] << 16);
+         memcpy(v[2].position, &xy, sizeof(xy));
+         memcpy(v[2].position + 1, planes, sizeof(uint32_t));
+         memcpy(v[2].position + 3, planes + 1, sizeof(uint32_t));
+         memcpy(v[2].native_uv, planes + 2, sizeof(v[2].native_uv));
+      }
+      v[2].native_flags |= 2;
+   }
+   if (v[0].texture_blend_mode == 1 ||
+       (colors[0] == colors[1] && colors[0] == colors[2]))
+      return;
    for (c = 0; c < 3; c++)
    {
       int32_t value[3];
@@ -5494,18 +5636,6 @@ static void gl_build_native_triangle_colors(gl_renderer *renderer,
       rhi_triangle_interpolant(planes + c * 2, x, y, value, denom, anchor);
    }
    gl_set_native_color_plane(v + 2, planes, colors[2]);
-}
-
-static void gl_build_native_line_colors(gl_renderer *renderer,
-      gl_command_vertex *v, const uint32_t *colors, HdTextureHandle hd)
-{
-   int32_t x[2], y[2];
-   uint32_t planes[6];
-   if (colors[0] == colors[1] ||
-       !gl_native_color_positions(renderer, v, 2, hd, x, y) ||
-       !rhi_line_color_planes(planes, x, y, colors))
-      return;
-   gl_set_native_color_plane(v + 1, planes, colors[1]);
 }
 
 static void push_primitive(
@@ -5537,9 +5667,7 @@ static void push_primitive(
        * a none handle inside the query. */
       HdTextureHandle hd = gl_tt_query_hd(renderer, v);
       if (colors && count == 3)
-         gl_build_native_triangle_colors(renderer, v, colors, hd);
-      else if (colors && count == 2)
-         gl_build_native_line_colors(renderer, v, colors, hd);
+         gl_build_native_triangle_interpolants(renderer, v, colors, hd);
       vertex_preprocessing(renderer, v, count, mode, stm, mask_test, set_mask, hd);
    }
 
@@ -5568,7 +5696,7 @@ static void push_primitive(
  * we drop them in favour of file-static const arrays plus small
  * accessor helpers since the layouts never change at runtime. */
 static const struct gl_attribute gl_command_vertex_attribs[] = {
-   { "position",           offsetof(gl_command_vertex, position),           GL_FLOAT,          4 },
+   { "position",           offsetof(gl_command_vertex, position),           GL_UNSIGNED_INT,   4 },
    { "color",              offsetof(gl_command_vertex, color),              GL_UNSIGNED_INT,   3 },
    { "fog",                offsetof(gl_command_vertex, fog),                GL_UNSIGNED_INT,   4 },
    { "texture_coord",      offsetof(gl_command_vertex, texture_coord),      GL_UNSIGNED_SHORT, 2 },
@@ -5583,8 +5711,9 @@ static const struct gl_attribute gl_command_vertex_attribs[] = {
       offsetof(gl_command_vertex, framebuffer_feedback), GL_UNSIGNED_BYTE, 1 },
    { "palette_cached",
       offsetof(gl_command_vertex, palette_cached), GL_UNSIGNED_BYTE, 1 },
-   { "native_color_plane",
-      offsetof(gl_command_vertex, native_color_plane), GL_UNSIGNED_BYTE, 1 },
+   { "native_flags",
+      offsetof(gl_command_vertex, native_flags), GL_UNSIGNED_BYTE, 1 },
+   { "native_uv", offsetof(gl_command_vertex, native_uv), GL_UNSIGNED_INT, 2 },
    { "texture_limits",     offsetof(gl_command_vertex, texture_limits),     GL_UNSIGNED_SHORT, 4 }
 };
 
@@ -7217,8 +7346,8 @@ void rhi_gl_push_quad(
          uint32_t colors[4] = {c0, c1, c2, c3};
          /* Indices 0,1,2 and 1,2,3 have distinct last vertices. Pack
           * each triangle's flat plane there without expanding the quad. */
-         gl_build_native_triangle_colors(renderer, v + 1, colors + 1, hd);
-         gl_build_native_triangle_colors(renderer, v, colors, hd);
+         gl_build_native_triangle_interpolants(renderer, v + 1, colors + 1, hd);
+         gl_build_native_triangle_interpolants(renderer, v, colors, hd);
          vertex_preprocessing(renderer, v, 4,
                GL_TRIANGLES, semi_transparency_mode, mask_test, set_mask, hd);
       }
@@ -7407,6 +7536,49 @@ void rhi_gl_push_line(
             semi_transparent,
          }
       };
+
+      {
+         int32_t x[2], y[2];
+         HdTextureHandle hd = hd_handle_make_none();
+         if (gl_native_positions(renderer, v, 2, hd, x, y))
+         {
+            gl_command_vertex quad[4], triangles[6];
+            uint32_t colors[2] = {c0, c1}, planes[6];
+            unsigned i, anchor = x[0] > x[1] ? 1 : 0;
+            int32_t dx = x[1 - anchor] - x[anchor];
+            int32_t dy = y[1 - anchor] - y[anchor];
+            bool horizontal = abs(dx) > abs(dy);
+            int32_t steps = horizontal ? abs(dx) : abs(dy);
+            bool gouraud = c0 != c1 &&
+                  rhi_line_color_planes(planes, x, y, colors);
+            gl_build_pgxp_line_quad(quad, v);
+            for (i = 0; i < 4; i++)
+            {
+               /* Widen the strip conservatively; the fragment shader
+                * selects the exact DDA pixel, including both endpoints. */
+               if (steps)
+                  quad[i].position[horizontal ? 1 : 0] +=
+                        (i & 1) ? 1.0f : -1.0f;
+               if (gouraud)
+                  gl_set_native_color_plane(quad + i, planes, i < 2 ? c0 : c1);
+               quad[i].native_flags |= 4;
+               quad[i].native_uv[0] = (uint16_t)x[anchor] |
+                     ((uint32_t)(uint16_t)y[anchor] << 16);
+               quad[i].native_uv[1] = (uint16_t)dx |
+                     ((uint32_t)(uint16_t)dy << 16);
+            }
+            gl_vram_sync_primitive(renderer, quad, 4);
+            triangles[0] = quad[0];
+            triangles[1] = quad[1];
+            triangles[2] = quad[2];
+            triangles[3] = quad[3];
+            triangles[4] = quad[2];
+            triangles[5] = quad[1];
+            push_primitive(renderer, triangles, 6, NULL,
+                  GL_TRIANGLES, semi_transparency_mode, mask_test, set_mask);
+            return;
+         }
+      }
 
       if (psx_pgxp_gl_line_expansion)
       {
@@ -8394,6 +8566,8 @@ void rhi_gl_fill_rect(
    uint16_t top_left[2];
    uint16_t dimensions[2];
    uint8_t col[3];
+   GLfloat clear_color[3];
+   unsigned channel;
    uint16_t draw_area_top_left[2];
    uint16_t draw_area_bot_right[2];
 
@@ -8411,6 +8585,13 @@ void rhi_gl_fill_rect(
    col[0]        = (uint8_t) color;
    col[1]        = (uint8_t) (color >> 8);
    col[2]        = (uint8_t) (color >> 16);
+
+   /* GP0 fill discards the low three bits. Supplying the resulting RGB5
+    * code directly avoids driver-dependent UNORM rounding on this target. */
+   for (channel = 0; channel < 3; channel++)
+      clear_color[channel] = renderer->fb_out_internal_format == GL_RGB5_A1
+            ? (GLfloat)(col[channel] >> 3) / 31.0f
+            : (GLfloat)col[channel] / 255.0f;
 
    if (renderer->tracker && renderer->texture_tracking_enabled)
    {
@@ -8465,9 +8646,7 @@ void rhi_gl_fill_rect(
             0);
 #endif
 
-      glClearColor(   (float) col[0] / 255.0,
-            (float) col[1] / 255.0,
-            (float) col[2] / 255.0,
+      glClearColor(clear_color[0], clear_color[1], clear_color[2],
             /* TODO - XXX Not entirely sure what happens to
                the mask bit in fill_rect commands */
             0.0);
