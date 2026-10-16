@@ -63,8 +63,9 @@ extern float psx_phase_error;    /* decoder carrier misalignment, cycles */
 extern int   psx_black_setup;    /* NTSC pedestal mismatch: 0 none, 1 lifted, 2 crushed */
 extern retro_log_printf_t log_cb;
 extern int   psx_hdr_overbright_hot;   /* additive/sub source: 0 clamped, 1 hot */
+extern unsigned int psx_pgxp_mode;
 extern int   psx_pgxp_color;           /* PGXP precise colour: vertex colour may exceed 1.0 on fp16 */
-extern int   psx_pgxp_fog;             /* PGXP linear-light depth cue; effective only with precise colour */
+extern int   psx_pgxp_fog;             /* PGXP byte-domain depth cue; effective only with precise colour */
 /* "HDR True Multi-Pass Blending": 1 routes non-masked subtractive prims
  * through the per-primitive programmable-blend path; 0 keeps them on
  * fixed-function REVERSE_SUBTRACT and floors the result with a MAX-blend
@@ -5539,7 +5540,20 @@ static bool semi_transparent_state_eq(const struct SemiTransparentState *a,
        * clear-quad positional initializers zero it, which is exactly the
        * no-cue encoding. */
       float fog[4];
+      /* Two wrapped 8.12 UV planes; ordinary/enhanced vertices leave these
+       * zero. Keeping the original UVs preserves filtered/HD fallback. */
+      uint32_t uv_plane[4];
    };
+
+/* Read both payloads as bits. Ordinary vertices carry float colour/fog;
+ * native polygons reuse those same 32 bytes for wrapped colour planes and
+ * their original packed colour. The vertex shader selects the interpretation. */
+static void renderer_set_interpolant_attribs(CommandBuffer *cmd)
+{
+   commandbuffer_set_vertex_attrib(cmd, 1, 0, VK_FORMAT_R32G32B32A32_UINT, offsetof(BufferVertex, color));
+   commandbuffer_set_vertex_attrib(cmd, 6, 0, VK_FORMAT_R32G32B32A32_UINT, offsetof(BufferVertex, fog));
+   commandbuffer_set_vertex_attrib(cmd, 7, 0, VK_FORMAT_R32G32B32A32_UINT, offsetof(BufferVertex, uv_plane));
+}
 
 /* Persistent GPU-written VRAM provenance at 8x8-block granularity,
  * the Vulkan analogue of the GL renderer's per-tile provenance from the
@@ -6108,7 +6122,8 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
    static bool renderer_analog_active(Renderer *self);
    static ImageHandle renderer_analog_apply(Renderer *self, unsigned native_w, unsigned native_h,
                                             unsigned out_w, unsigned out_h);
-   static void renderer_draw_quad(Renderer *self, const Vertex *vertices);
+   static void renderer_draw_quad(Renderer *self, const Vertex *vertices, bool polygon,
+      const Vertex *line_vertices);
    static void renderer_init_pipelines(Renderer *self);
    static TTRect renderer_compute_vram_framebuffer_rect(Renderer *self);
    static void renderer_hd_texture_uniforms(Renderer *self,
@@ -6176,12 +6191,11 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
       renderer_set_opaque_primitive_spec_constants(self, TransMode_SemiTransOpaque);
       commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, color));
+      renderer_set_interpolant_attribs(cbh_get(&self->cmd));
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 2, 0, VK_FORMAT_R8G8B8A8_UINT, offsetof(BufferVertex, window));
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 3, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, pal_x));
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 4, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, u));
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 5, 0, VK_FORMAT_R16G16B16A16_UINT, offsetof(BufferVertex, min_u));
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 6, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, fog));
 
       renderer_dispatch(self, vertices, scissors, true);
    }
@@ -6198,12 +6212,11 @@ static bool owned_u32_empty(const struct OwnedU32Buf *b) { return b->n == 0; }
       renderer_set_opaque_primitive_spec_constants(self, TransMode_Opaque);
       commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, color));
+      renderer_set_interpolant_attribs(cbh_get(&self->cmd));
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 2, 0, VK_FORMAT_R8G8B8A8_UINT, offsetof(BufferVertex, window));
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 3, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, pal_x)); /* Pad to support AMD */
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 4, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, u));
       commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 5, 0, VK_FORMAT_R16G16B16A16_UINT, offsetof(BufferVertex, min_u));
-      commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 6, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, fog));
 
       renderer_dispatch(self, vertices, scissors, true);
    }
@@ -9390,6 +9403,7 @@ static void renderer_build_attribs(Renderer *self, BufferVertex *output, const V
       output[i].fog[1]   = vertices[i].fog[1];
       output[i].fog[2]   = vertices[i].fog[2];
       output[i].fog[3]   = vertices[i].fog[3];
+      memset(output[i].uv_plane, 0, sizeof(output[i].uv_plane));
       output[i].window = self->render_state.texture_window;
       output[i].pal_x = (int16_t)(self->render_state.palette_offset_x);
       output[i].pal_y = (int16_t)(self->render_state.palette_offset_y);
@@ -9579,7 +9593,155 @@ static void renderer_draw_line(Renderer *self, const Vertex *vertices)
     * games render. */
    Vertex vert[4];
    renderer_build_line_quad(self, vert, vertices);
-   renderer_draw_quad(self, vert);
+   renderer_draw_quad(self, vert, false, vertices);
+}
+
+/* Only the low 20 bits survive an 8.12 accumulator. Reuse the same
+ * encoding for colour and UV: origin20/dx12, followed by dx8/dy20. */
+static void renderer_pack_interpolant(uint32_t *packed,
+      uint32_t origin, uint32_t dx, uint32_t dy)
+{
+   packed[0] = (origin & 0xfffffu) | (dx << 20);
+   packed[1] = ((dx >> 12) & 0xffu) | ((dy & 0xfffffu) << 8);
+}
+
+/* The packed payload is shared by polygon and line colour interpolation.
+ * Preserve mask alpha and the original byte colour for enhanced shading. */
+static void renderer_set_native_color_plane(BufferVertex *output,
+      const uint32_t *planes, uint32_t original_color)
+{
+   uint32_t packed[8];
+   memcpy(packed, planes, 6 * sizeof(uint32_t));
+   packed[6] = (original_color & 0xffffffu) |
+         (output->color[3] != 0.0f ? 0xff000000u : 0u);
+   packed[7] = 0;
+   output->params = (int16_t)((uint16_t)output->params | 0x0004u);
+   memcpy(output->color, packed, sizeof(output->color));
+   memcpy(output->fog, packed + 4, sizeof(output->fog));
+}
+
+/* Lines advance colour once per dominant-axis pixel, including the endpoint.
+ * Derive from the original GP0 endpoints, not the expanded drawing quad: its
+ * extra endpoint pixel must not stretch the colour gradient. The existing
+ * line coverage remains independent of this colour accumulator. */
+static void renderer_build_native_line_colors(Renderer *self,
+      BufferVertex *output, const Vertex *vertices)
+{
+   int32_t x[2], y[2], dx, dy, steps;
+   uint32_t planes[6];
+   unsigned i, c, anchor;
+   bool horizontal;
+
+   if (!self->render_state.native_color || self->scaling != 1 ||
+       self->msaa != 1 || psx_pgxp_mode != 0 ||
+       vertices[0].color == vertices[1].color)
+      return;
+   for (i = 0; i < 2; i++)
+   {
+      float px = vertices[i].x + self->render_state.draw_offset_x;
+      float py = vertices[i].y + self->render_state.draw_offset_y;
+      if (vertices[i].w != 1.0f ||
+          !(px >= -32768.0f && px <= 32767.0f) ||
+          !(py >= -32768.0f && py <= 32767.0f))
+         return;
+      x[i] = (int32_t)px;
+      y[i] = (int32_t)py;
+      if ((float)x[i] != px || (float)y[i] != py)
+         return;
+   }
+   dx = x[1] - x[0];
+   dy = y[1] - y[0];
+   horizontal = abs(dx) > abs(dy);
+   steps = horizontal ? abs(dx) : abs(dy);
+   if (!steps)
+      return;
+   /* DrawLine swaps endpoints on descending X, including equal-major ties. */
+   anchor = x[0] > x[1] ? 1 : 0;
+   for (c = 0; c < 3; c++)
+   {
+      int32_t first = (vertices[anchor].color >> (c * 8)) & 255;
+      int32_t last = (vertices[1 - anchor].color >> (c * 8)) & 255;
+      int32_t step = (last - first) * 4096 / steps;
+      int32_t direction = horizontal ? x[1 - anchor] - x[anchor] :
+            y[1 - anchor] - y[anchor];
+      uint32_t slope = (uint32_t)(direction < 0 ? -step : step);
+      uint32_t origin = ((uint32_t)first << 12) + 2048u - slope *
+            (uint32_t)(horizontal ? x[anchor] : y[anchor]);
+      renderer_pack_interpolant(planes + c * 2, origin,
+            horizontal ? slope : 0u, horizontal ? 0u : slope);
+   }
+   for (i = 0; i < 6; i++)
+      renderer_set_native_color_plane(output + i, planes,
+            vertices[i < 2 || i == 3 ? 0 : 1].color);
+}
+
+/* Build from GP0 bytes and the queued, draw-offset-adjusted positions.
+ * Unsigned arithmetic preserves the rasterizer's wrapped 8.12 accumulator.
+ * Planes travel with their triangle, so flush/reset/restore retain no side
+ * state. Enhanced geometry keeps its existing interpolation policy. */
+static void renderer_build_native_interpolants(Renderer *self,
+      BufferVertex *output, const Vertex *vertices)
+{
+   int32_t x[3], y[3];
+   int64_t denom;
+   uint32_t planes[10];
+   unsigned i, c, anchor;
+   bool color = self->render_state.native_color &&
+         (vertices[0].color != vertices[1].color ||
+          vertices[0].color != vertices[2].color);
+   bool uv = self->render_state.texture_mode != TextureMode_None &&
+         (vertices[0].u != vertices[1].u || vertices[0].u != vertices[2].u ||
+          vertices[0].v != vertices[1].v || vertices[0].v != vertices[2].v);
+
+   if ((!color && !uv) || self->scaling != 1 ||
+       self->msaa != 1 || psx_pgxp_mode != 0)
+      return;
+   for (i = 0; i < 3; i++)
+   {
+      if (vertices[i].w != 1.0f ||
+          !(output[i].x >= -32768.0f && output[i].x <= 32767.0f) ||
+          !(output[i].y >= -32768.0f && output[i].y <= 32767.0f))
+         return;
+      x[i] = (int32_t)output[i].x;
+      y[i] = (int32_t)output[i].y;
+      if ((float)x[i] != output[i].x || (float)y[i] != output[i].y)
+         return;
+   }
+   denom = (int64_t)(x[1] - x[0]) * (y[2] - y[1]) -
+         (int64_t)(x[2] - x[1]) * (y[1] - y[0]);
+   if (!denom)
+      return;
+
+   /* Match DrawTriangle's core-vertex choice, including equal-X ties. */
+   anchor = x[1] <= x[0] ? (x[2] <= x[1] ? 2 : 1) :
+         (x[2] < x[0] ? 2 : 0);
+   for (c = 0; c < 5; c++)
+   {
+      int32_t value[3];
+      uint32_t dx, dy, origin;
+      if (c < 3 ? !color : !uv)
+         continue;
+      for (i = 0; i < 3; i++)
+         value[i] = c < 3 ? ((vertices[i].color >> (c * 8)) & 255) :
+               (c == 3 ? vertices[i].u : vertices[i].v);
+      dx = (uint32_t)(((int64_t)(value[1] - value[0]) * (y[2] - y[1]) -
+            (int64_t)(value[2] - value[1]) * (y[1] - y[0])) * 4096 / denom);
+      dy = (uint32_t)(((int64_t)(x[1] - x[0]) * (value[2] - value[1]) -
+            (int64_t)(x[2] - x[1]) * (value[1] - value[0])) * 4096 / denom);
+      origin = ((uint32_t)value[anchor] << 12) + 2048u -
+            dx * (uint32_t)x[anchor] - dy * (uint32_t)y[anchor];
+      renderer_pack_interpolant(planes + c * 2, origin, dx, dy);
+   }
+   for (i = 0; i < 3; i++)
+   {
+      if (color)
+         renderer_set_native_color_plane(output + i, planes, vertices[i].color);
+      if (uv)
+      {
+         output[i].params = (int16_t)((uint16_t)output[i].params | 0x0008u);
+         memcpy(output[i].uv_plane, planes + 6, sizeof(output[i].uv_plane));
+      }
+   }
 }
 
 static void renderer_draw_triangle(Renderer *self, const Vertex *vertices)
@@ -9597,6 +9759,7 @@ static void renderer_draw_triangle(Renderer *self, const Vertex *vertices)
    unsigned shift = 0;
    bool offset_uv = false;
    renderer_build_attribs(self, vert, vertices, 3, &hd_texture_index, &filtering, &scaled_read, &shift, &offset_uv);
+   renderer_build_native_interpolants(self, vert, vertices);
    { const int scissor_index = self->queue.scissor_invariant ? -1 : (int)(Rect2DVec_size(&self->queue.scissors) - 1);
    BufferVertexVec *out = renderer_select_pipeline(self, 1, scissor_index, hd_texture_index, filtering, scaled_read, shift, offset_uv);
    if (out)
@@ -9638,10 +9801,11 @@ static void renderer_draw_triangle(Renderer *self, const Vertex *vertices)
    }
 }
 
-static void renderer_draw_quad(Renderer *self, const Vertex *vertices)
+static void renderer_draw_quad(Renderer *self, const Vertex *vertices, bool polygon,
+      const Vertex *line_vertices)
 {
    HdTextureHandle hd_texture_index;
-   BufferVertex vert[4];
+   BufferVertex vert[6];
    if (!self->render_state.draw_rect.width || !self->render_state.draw_rect.height)
       return;
 
@@ -9660,6 +9824,16 @@ static void renderer_draw_quad(Renderer *self, const Vertex *vertices)
    unsigned shift = 0;
    bool offset_uv = false;
    renderer_build_attribs(self, vert, vertices, 4, &hd_texture_index, &filtering, &scaled_read, &shift, &offset_uv);
+   vert[5] = vert[3];
+   vert[4] = vert[2];
+   vert[3] = vert[1];
+   if (line_vertices)
+      renderer_build_native_line_colors(self, vert, line_vertices);
+   else if (polygon)
+   {
+      renderer_build_native_interpolants(self, vert, vertices);
+      renderer_build_native_interpolants(self, vert + 3, vertices + 1);
+   }
    { const int scissor_index = self->queue.scissor_invariant ? -1 : (int)(Rect2DVec_size(&self->queue.scissors) - 1);
    BufferVertexVec *out = renderer_select_pipeline(self, 2, scissor_index, hd_texture_index, filtering, scaled_read, shift, offset_uv);
 
@@ -9668,9 +9842,9 @@ static void renderer_draw_quad(Renderer *self, const Vertex *vertices)
       BufferVertexVec_push(out, &vert[0]);
       BufferVertexVec_push(out, &vert[1]);
       BufferVertexVec_push(out, &vert[2]);
+      BufferVertexVec_push(out, &vert[5]);
+      BufferVertexVec_push(out, &vert[4]);
       BufferVertexVec_push(out, &vert[3]);
-      BufferVertexVec_push(out, &vert[2]);
-      BufferVertexVec_push(out, &vert[1]);
    }
 
    if (self->render_state.mask_test || self->render_state.semi_transparent != SemiTransparentMode_None)
@@ -9690,9 +9864,9 @@ static void renderer_draw_quad(Renderer *self, const Vertex *vertices)
       BufferVertexVec_push(&self->queue.semi_transparent, &vert[0]);
       BufferVertexVec_push(&self->queue.semi_transparent, &vert[1]);
       BufferVertexVec_push(&self->queue.semi_transparent, &vert[2]);
+      BufferVertexVec_push(&self->queue.semi_transparent, &vert[5]);
+      BufferVertexVec_push(&self->queue.semi_transparent, &vert[4]);
       BufferVertexVec_push(&self->queue.semi_transparent, &vert[3]);
-      BufferVertexVec_push(&self->queue.semi_transparent, &vert[2]);
-      BufferVertexVec_push(&self->queue.semi_transparent, &vert[1]);
       SemiTransparentStateVec_push(&self->queue.semi_transparent_state, &state);
       SemiTransparentStateVec_push(&self->queue.semi_transparent_state, &state);
 
@@ -10133,9 +10307,8 @@ static void renderer_render_opaque_primitives(Renderer *self){
    commandbuffer_set_cull_mode(cbh_get(&self->cmd), VK_CULL_MODE_NONE);
    commandbuffer_set_depth_compare(cbh_get(&self->cmd), VK_COMPARE_OP_LESS);
    commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
-   commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, color));
+   renderer_set_interpolant_attribs(cbh_get(&self->cmd));
    commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 3, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, pal_x));
-   commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 6, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, fog));
    renderer_set_opaque_primitive_spec_constants(self, TransMode_Opaque);
    commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
 
@@ -10291,12 +10464,11 @@ static void renderer_render_semi_transparent_primitives(Renderer *self){
    commandbuffer_set_depth_test(cbh_get(&self->cmd), true, false);
    commandbuffer_set_primitive_topology(cbh_get(&self->cmd), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
    commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 0);
-   commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, color));
+   renderer_set_interpolant_attribs(cbh_get(&self->cmd));
    commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 2, 0, VK_FORMAT_R8G8B8A8_UINT, offsetof(BufferVertex, window));
    commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 3, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, pal_x));
    commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 4, 0, VK_FORMAT_R16G16B16A16_SINT, offsetof(BufferVertex, u));
    commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 5, 0, VK_FORMAT_R16G16B16A16_UINT, offsetof(BufferVertex, min_u));
-   commandbuffer_set_vertex_attrib(cbh_get(&self->cmd), 6, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(BufferVertex, fog));
 
    { bool append_floor = self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT &&
          !psx_hdr_multipass;
@@ -21208,7 +21380,7 @@ void rhi_vulkan_push_quad(
 
       vertices_set_cf(vertices, 4, precise_rgb);
       vertices_set_fog(vertices, 4, fog);
-      renderer_draw_quad(renderer, vertices);
+      renderer_draw_quad(renderer, vertices, !is_sprite, NULL);
    }
 }
 
