@@ -7680,14 +7680,47 @@ static DisplayRect renderer_compute_display_rect(Renderer *self)
    }
 }
 
+/* Resolve the exact region scanout will read, in both SDR and HDR. The
+ * single-sample image is derived from the MSAA framebuffer; neither scanout
+ * entry point may sample its previous contents instead of current draws. */
+static void renderer_resolve_scanout_msaa(Renderer *self, const TTRect *rect)
+{
+   struct WPush { int32_t offset[2]; int32_t extent[2]; } push;
+   renderer_ensure_command_buffer(self);
+   push.offset[0] = (int32_t)(rect->x * self->scaling);
+   push.offset[1] = (int32_t)(rect->y * self->scaling);
+   push.extent[0] = (int32_t)(rect->width * self->scaling);
+   push.extent[1] = (int32_t)(rect->height * self->scaling);
+   commandbuffer_image_barrier(cbh_get(&self->cmd), ih_get(&self->scaled_framebuffer_msaa),
+      VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Samples, self->msaa);
+   commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_ResolveEotf, psx_hdr_sdr_eotf);
+   commandbuffer_set_specialization_constant_mask(cbh_get(&self->cmd),
+      (1u << SpecConstIndex_Samples) | (1u << SpecConstIndex_ResolveEotf));
+   commandbuffer_set_program(cbh_get(&self->cmd),
+      self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT
+         ? self->pipelines.msaa_resolve_weighted
+         : self->pipelines.msaa_resolve_weighted_sdr);
+   commandbuffer_set_storage_texture(cbh_get(&self->cmd), 0, 0, iv_get(imageview_vec_at(&self->scaled_views, 0)));
+   commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 1,
+      image_get_view(ih_get(&self->scaled_framebuffer_msaa)), StockSampler_NearestClamp);
+   commandbuffer_push_constants(cbh_get(&self->cmd), &push, 0, sizeof(push));
+   commandbuffer_dispatch(cbh_get(&self->cmd), (push.extent[0] + 7) / 8, (push.extent[1] + 7) / 8, 1);
+   commandbuffer_barrier_simple(cbh_get(&self->cmd),
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+}
+
 static ImageHandle renderer_scanout_vram_to_texture(Renderer *self, bool scaled)
 {
    RenderPassInfo rp;
    unsigned render_scale;
    /* Like renderer_scanout_to_texture(self), but synchronizes the entire
     * VRAM self->framebuffer self->atlas before scanout. Does not apply
-    * any scanout filters and currently outputs at 15-bit
-    * color depth. Current implementation does not reuse
+    * any scanout filters. Preserve framebuffer precision rather than
+    * quantizing the diagnostic view again. This implementation does not reuse
     * prior scanouts. */
 
    fbatlas_flush_render_pass(&self->atlas);
@@ -7701,43 +7734,8 @@ static ImageHandle renderer_scanout_vram_to_texture(Renderer *self, bool scaled)
 
    renderer_ensure_command_buffer(self);
 
-   if (scaled && self->msaa > 1 &&
-         self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT)
-   {
-      /* HDR: tonemap-weighted (Karis) compute resolve. The fixed-function
-       * vkCmdResolveImage below does a plain linear box average, which under
-       * HDR lets a lone very-bright sub-sample dominate and leaves the edge
-       * aliased after the PQ curve. Weighting each sample by 1/(1+luma)
-       * softens it. Writes level 0 of the single-sample scaled framebuffer;
-       * both images stay in GENERAL. */
-      unsigned rw = FB_WIDTH * self->scaling;
-      unsigned rh = FB_HEIGHT * self->scaling;
-      struct WPush { int32_t offset[2]; int32_t extent[2]; } wpush;
-      wpush.offset[0] = 0; wpush.offset[1] = 0;
-      wpush.extent[0] = (int32_t)rw; wpush.extent[1] = (int32_t)rh;
-
-      commandbuffer_image_barrier(cbh_get(&self->cmd), ih_get(&self->scaled_framebuffer_msaa),
-         VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
-         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-
-      commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Samples, self->msaa);
-      commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_ResolveEotf, psx_hdr_sdr_eotf);
-      commandbuffer_set_specialization_constant_mask(cbh_get(&self->cmd),
-         (1u << SpecConstIndex_Samples) | (1u << SpecConstIndex_ResolveEotf));
-      commandbuffer_set_program(cbh_get(&self->cmd),
-         self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT
-            ? self->pipelines.msaa_resolve_weighted
-            : self->pipelines.msaa_resolve_weighted_sdr);
-      commandbuffer_set_storage_texture(cbh_get(&self->cmd), 0, 0, iv_get(imageview_vec_at(&self->scaled_views, 0)));
-      commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 1, image_get_view(ih_get(&self->scaled_framebuffer_msaa)), StockSampler_NearestClamp);
-      commandbuffer_push_constants(cbh_get(&self->cmd), &wpush, 0, sizeof(wpush));
-      commandbuffer_dispatch(cbh_get(&self->cmd), (rw + 7) / 8, (rh + 7) / 8, 1);
-
-      commandbuffer_barrier_simple(cbh_get(&self->cmd),
-         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-   }
+   if (scaled && self->msaa > 1)
+      renderer_resolve_scanout_msaa(self, &vram_rect);
 
    render_scale = scaled ? self->scaling : 1;
 
@@ -7745,7 +7743,7 @@ static ImageHandle renderer_scanout_vram_to_texture(Renderer *self, bool scaled)
          FB_WIDTH * render_scale,
          FB_HEIGHT * render_scale,
          psx_hdr_active ? renderer_hdr_scanout_format(self)
-            : VK_FORMAT_A1R5G5B5_UNORM_PACK16); /* Default to 15bit color for now */
+            : VK_FORMAT_R8G8B8A8_UNORM); /* Preserve the displayed VRAM bytes. */
 
    info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
    info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
@@ -8472,53 +8470,8 @@ static ImageHandle renderer_scanout_to_texture(Renderer *self)
 
    if (!bpp24 && ssaa)
       renderer_ssaa_framebuffer(self);
-   else if (self->msaa > 1)
-   {
-      renderer_ensure_command_buffer(self);
-      { VkImageSubresourceLayers subres = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-      VkOffset3D offset = { (int)(rect->x * self->scaling), (int)(rect->y * self->scaling), 0 };
-      VkExtent3D extent = { rect->width * self->scaling, rect->height * self->scaling, 1 };
-      if (rect->x + rect->width > FB_WIDTH)
-      {
-         offset.x = 0;
-         extent.width = FB_WIDTH * self->scaling;
-      }
-      if (rect->y + rect->height > FB_HEIGHT)
-      {
-         offset.y = 0;
-         extent.height = FB_HEIGHT * self->scaling;
-      }
-      {
-         /* Compute resolve of the displayed region, both formats (see
-          * renderer_scanout_vram_to_texture for the rationale). */
-         struct WPush { int32_t offset[2]; int32_t extent[2]; } wpush;
-         wpush.offset[0] = offset.x;            wpush.offset[1] = offset.y;
-         wpush.extent[0] = (int32_t)extent.width; wpush.extent[1] = (int32_t)extent.height;
-
-         commandbuffer_image_barrier(cbh_get(&self->cmd), ih_get(&self->scaled_framebuffer_msaa),
-            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
-            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-
-         commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_Samples, self->msaa);
-         commandbuffer_set_specialization_constant(cbh_get(&self->cmd), SpecConstIndex_ResolveEotf, psx_hdr_sdr_eotf);
-         commandbuffer_set_specialization_constant_mask(cbh_get(&self->cmd),
-            (1u << SpecConstIndex_Samples) | (1u << SpecConstIndex_ResolveEotf));
-         commandbuffer_set_program(cbh_get(&self->cmd),
-            self->scaled_fb_format == VK_FORMAT_R16G16B16A16_SFLOAT
-               ? self->pipelines.msaa_resolve_weighted
-               : self->pipelines.msaa_resolve_weighted_sdr);
-         commandbuffer_set_storage_texture(cbh_get(&self->cmd), 0, 0, iv_get(imageview_vec_at(&self->scaled_views, 0)));
-         commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 1, image_get_view(ih_get(&self->scaled_framebuffer_msaa)), StockSampler_NearestClamp);
-         commandbuffer_push_constants(cbh_get(&self->cmd), &wpush, 0, sizeof(wpush));
-         commandbuffer_dispatch(cbh_get(&self->cmd), (extent.width + 7) / 8, (extent.height + 7) / 8, 1);
-
-         commandbuffer_barrier_simple(cbh_get(&self->cmd),
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_WRITE_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
-      }
-      }
-   }
+   else if (!bpp24 && self->msaa > 1)
+      renderer_resolve_scanout_msaa(self, &read_rect);
 
    if (self->render_state.adaptive_smoothing && !bpp24 && !ssaa && self->scaling != 1)
       renderer_mipmap_framebuffer(self);
@@ -8540,7 +8493,8 @@ static ImageHandle renderer_scanout_to_texture(Renderer *self)
          analog ? VK_FORMAT_R16G16B16A16_SFLOAT
          : hdr_quad ? renderer_hdr_scanout_format(self)
             : (self->render_state.scanout_mode == ScanoutMode_ABGR1555_Dither &&
-               !self->render_state.native_color ? VK_FORMAT_A1R5G5B5_UNORM_PACK16 : VK_FORMAT_R8G8B8A8_UNORM));
+               !self->render_state.native_color && psx_src_primaries == 0
+               ? VK_FORMAT_A1R5G5B5_UNORM_PACK16 : VK_FORMAT_R8G8B8A8_UNORM));
 
    info.initial_layout = VK_IMAGE_LAYOUT_UNDEFINED;
    info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
@@ -8644,15 +8598,9 @@ static ImageHandle renderer_scanout_to_texture(Renderer *self)
       commandbuffer_set_texture_view_stock(cbh_get(&self->cmd), 0, 2, image_get_view(ih_get(&self->dither_lut)), StockSampler_NearestWrap);
       { struct DitherData
       {
-         float range;
-         float inv_range;
-         float dither_scale;
          int32_t dither_shift;
       };
       struct DitherData *dither = (struct DitherData *)commandbuffer_allocate_constant_data(cbh_get(&self->cmd), 0, 3, 1 * sizeof(struct DitherData));
-      dither->range = 31.0f;
-      dither->inv_range = 1.0f / 31.0f;
-      dither->dither_scale = 1.0f;
 
       if (self->render_state.dither_native_resolution && scaled)
       {
