@@ -24,8 +24,7 @@ static bool IsAxisAlignedTriangle(const tri_vertex *vertices)
 		 vertices[1].y == vertices[2].y);
 }
 
-/* Match the decoder's size culling when selecting a surviving triangle.
- * Check saved vertices too before recomputing completed-quad corrections. */
+/* Match decoder size culling, including retained vertices. */
 static bool TriangleFits(const tri_vertex *vertices, unsigned shift)
 {
 	int32_t min_x = MIN(vertices[0].x, MIN(vertices[1].x, vertices[2].x));
@@ -36,10 +35,7 @@ static bool TriangleFits(const tri_vertex *vertices, unsigned shift)
 		(int64_t)max_y - min_y < ((int64_t)512 << shift);
 }
 
-/* Hardware submits both triangles together. A zero UV derivative in one
- * triangle does not make an oblique 3D quad a sprite. Check the complete
- * strip, including the first vertex retained by the command decoder.
- * Reuse the current triangle's depth test rather than comparing it twice. */
+/* Classify the complete strip; one aligned triangle does not imply a sprite. */
 static bool IsAxisAlignedQuad(const tri_vertex *first,
       const tri_vertex *vertices, bool triangle_is_3d)
 {
@@ -137,8 +133,7 @@ void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned cou
 			hardware_quad = first_valid && second_valid && texArea != 0;
 			if (hardware_quad)
 			{
-				/* Rebuild completed-quad corrections from saved vertices.
-				 * Do not carry a first-triangle guess across reset/restore. */
+				/* Recompute complete-quad corrections from retained vertices. */
 				off_u = off_v = 0;
 				may_be_2d = false;
 			}
@@ -222,12 +217,8 @@ void Calc_UVOffsets_Adjust_Verts(PS_GPU *gpu, tri_vertex *vertices, unsigned cou
 		}
 		if (hardware_command && !hardware_quad && (first_valid || second_valid))
 		{
-			/* Degenerate quads can encode a single triangle. Preserve 2D
-			 * fallback artwork without applying sprite corrections to an
-			 * oblique surviving triangle. A collapsed second UV triangle
-			 * uses the saved first mapping; its first vertex may already
-			 * have the one-pixel adjustment, so these cached corrections
-			 * must be saved along with the pending command. */
+			/* Preserve 2D fallbacks; collapsed UVs need the saved first mapping,
+			 * which may already include one-pixel vertex adjustments. */
 			bool sprite_geometry = first_valid && second_valid ?
 				IsAxisAlignedQuad(&gpu->InQuad_F3Vertices[0], vertices, is3D) :
 				IsAxisAlignedTriangle(first_valid ? gpu->InQuad_F3Vertices : vertices);

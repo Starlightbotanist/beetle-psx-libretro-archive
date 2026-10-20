@@ -1407,12 +1407,7 @@ void GPU_Power(void)
    GPU.DataReadBufferEx = 0;
    GPU.InCmd = INCMD_NONE;
    GPU.InCmd_CC = 0;
-   /* Mid-cmd quad state. Power doesn't strictly need to clear these
-    * because they're only consumed when InCmd == INCMD_QUAD (and we
-    * just zeroed InCmd above), but explicit clears match the saved
-    * state and make cold-reset behavior deterministic regardless of
-    * BSS contents. The UV correction fields are cleared by the common
-    * GPU_SoftReset() call below, as on a GP1 reset. */
+   /* Clear pending-quad state; GPU_SoftReset() clears UV corrections. */
    GPU.InQuad_clut = 0;
    GPU.InQuad_invalidW = false;
    GPU.killQuadPart = 0;
@@ -3048,10 +3043,8 @@ void GPU_RestoreStateP3(void)
 
 int GPU_StateAction(StateMem *sm, int load, int data_only)
 {
-   /* These are needed only while a quad command is incomplete. Older
-    * states omit them; use neutral defaults instead of a previous draw's
-    * cache. The original UV cannot always be recovered after the one-pixel
-    * vertex adjustment, so retain the computed mapping in new states. */
+   /* Retain pending UV corrections; adjusted vertices cannot reconstruct them.
+    * Neutral defaults keep older states from inheriting a previous draw. */
    uint16_t off_u = !load && GPU.InCmd == INCMD_QUAD ? GPU.off_u : 0;
    uint16_t off_v = !load && GPU.InCmd == INCMD_QUAD ? GPU.off_v : 0;
    bool may_be_2d = !load && GPU.InCmd == INCMD_QUAD && GPU.may_be_2d;

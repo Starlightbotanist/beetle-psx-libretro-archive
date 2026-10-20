@@ -178,8 +178,7 @@ static INLINE bool CalcIDeltas_##SUFFIX(i_deltas *idl, const tri_vertex *A, cons
    } \
    if (TEXTURED_LIT) \
    { \
-      /* Preserve native UV precision on the finer raster grid. Widen \
-       * before multiplying: valid upscaled triangles can exceed int32. */ \
+      /* Keep native UV precision; widen products to avoid upscaled overflow. */ \
       unsigned precision = COORD_FBS + upscale_shift; \
       unsigned padding = COORD_POST_PADDING - upscale_shift; \
       idl->du_dx = (uint32_t)((int64_t)CALCIS(u, y) * (INT64_C(1) << precision) / denom) << padding; \
@@ -959,8 +958,7 @@ static INLINE void DrawSpan_##SUFFIX(PS_GPU *gpu, int y, const int32_t x_start, 
           *     correct 0 (clamp(.,0,max) + +0.5 bias = 0..max+0.5, \
           *     int cast = 0..max, AND = same; for negative inputs \
           *     pre-clamp, the clamp brings them to 0 anyway). \
-          * The half-texel bias matches the affine seed at every \
-          * resolution and preserves native rounding before truncation. */ \
+          * Half-texel bias preserves affine rounding at every resolution. */ \
          if (pct) \
          { \
             /* Pull the perspective-correct UV from the SIMD-precomputed \
@@ -1180,10 +1178,8 @@ static INLINE void DrawTriangle_##SUFFIX(PS_GPU *gpu, tri_vertex *vertices, cons
    /* [0] should be top vertex, [2] should be bottom vertex, [1] should be off to the side vertex. */ \
    if (TEXTURED_LIT) \
    { \
-      /* Software samples its planes at integer raster positions. Keep \
-       * native half-texel rounding at every scale; shrinking this phase \
-       * and borrowing hardware sprite offsets adds texture jumps when \
-       * a projected triangle temporarily satisfies the sprite heuristic. */ \
+      /* Keep native rounding at every scale; hardware sprite offsets cause \
+       * discontinuities when projected edges align. */ \
       ig.u = (COORD_MF_INT(vertices[core_vertex].u) + (1 << (COORD_FBS - 1))) << COORD_POST_PADDING; \
       ig.v = (COORD_MF_INT(vertices[core_vertex].v) + (1 << (COORD_FBS - 1))) << COORD_POST_PADDING; \
       if (pct_local) \
@@ -1619,7 +1615,7 @@ static void Command_DrawPolygon_##SUFFIX(PS_GPU *gpu, const uint32_t *cb) \
                gpu->InQuad_F3Vertices[0].precise[1] = gpu->InQuad_F3Vertices[0].y; \
             } \
          } \
-         /* default first vertex of quad to 1 if any of the vertices are 1 (even if the first triangle was okay) */ \
+         /* Apply the unit-depth fallback to the retained first vertex too. */ \
          gpu->InQuad_F3Vertices[0].precise[2] = 1.f; \
       } \
    } \
