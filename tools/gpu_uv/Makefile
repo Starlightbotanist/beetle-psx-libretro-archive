@@ -15,7 +15,7 @@ SRC := geometry.c $(ROOT)/mednafen/psx/gpu_polygon_sub.c
 DECODER_SRC := decoder.c $(ROOT)/mednafen/psx/gpu_polygon_sub.c $(ROOT)/pgxp/pgxp_gpu.c $(ROOT)/mednafen/state.c $(ROOT)/libretro-common/compat/compat_strl.c
 SERIALIZATION_SRC := serialization.c $(ROOT)/mednafen/psx/gpu.c $(ROOT)/mednafen/state.c $(ROOT)/libretro-common/compat/compat_strl.c
 
-all: geometry$(EXEEXT) serialization$(EXEEXT) decoder$(EXEEXT)
+all: geometry$(EXEEXT) serialization$(EXEEXT) decoder$(EXEEXT) software$(EXEEXT)
 
 geometry$(EXEEXT): $(SRC) $(ROOT)/mednafen/psx/gpu.h $(ROOT)/rhi/rhi_intf.h $(ROOT)/beetle_psx_globals.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $(SRC)
@@ -26,12 +26,16 @@ serialization$(EXEEXT): test_stubs.h $(SERIALIZATION_SRC) $(wildcard $(ROOT)/med
 decoder$(EXEEXT): $(DECODER_SRC) test_stubs.h $(wildcard $(ROOT)/mednafen/psx/gpu*.h $(ROOT)/mednafen/psx/gpu*.c) $(ROOT)/pgxp/pgxp_gpu.h
 	$(CC) $(CPPFLAGS) $(SERIALIZATION_CPPFLAGS) $(SERIALIZATION_CFLAGS) -o $@ $(DECODER_SRC) $(SERIALIZATION_LDFLAGS)
 
+software$(EXEEXT): software.c test_stubs.h $(wildcard $(ROOT)/mednafen/psx/gpu*.h $(ROOT)/mednafen/psx/gpu*.c)
+	$(CC) $(CPPFLAGS) $(SERIALIZATION_CPPFLAGS) $(SERIALIZATION_CFLAGS) -o $@ software.c $(ROOT)/mednafen/psx/gpu_polygon_sub.c $(ROOT)/mednafen/state.c $(ROOT)/libretro-common/compat/compat_strl.c $(SERIALIZATION_LDFLAGS)
+
 check: all
 	./geometry$(EXEEXT)
 	./serialization$(EXEEXT)
 	./decoder$(EXEEXT)
+	./software$(EXEEXT)
 
 clean:
-	rm -f geometry geometry.exe serialization serialization.exe decoder decoder.exe
+	rm -f geometry geometry.exe serialization serialization.exe decoder decoder.exe software software.exe
 
 .PHONY: all check clean

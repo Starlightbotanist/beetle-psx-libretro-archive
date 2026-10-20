@@ -196,3 +196,34 @@ by PGXP. A save/restore at frame 80 matched uninterrupted execution in all
 This is scene-specific integration evidence; it does not establish all PGXP
 configurations, deliberate PGXP-on mid-quad interruption, or pending-command
 restoration across renderers. Capture hosts remain local development tools.
+
+## Software upscaling and UV rounding
+
+The software rasterizer samples fixed-point planes at integer raster
+positions. Its native half-texel rounding is independent of resolution.
+The hardware sprite edge offsets are not software interpolation rounding;
+applying them introduces a discontinuity as projected derivatives cross zero.
+
+`software.c` calls the real textured-triangle decoder and reads its result
+through GP0 framebuffer readback. An independent rational barycentric reference
+checks native-grid samples. The domain is small and large triangles, each axis-aligned or sheared,
+six vertex orders, four UV flips and 1x/2x/4x/8x/16x software resolution:
+480 affine cases and 343,560 interior samples. Their native UV planes are exactly representable with 12 fractional
+bits. Upscaling must retain that precision; gradient truncation must not
+change half-texel ties. Large inputs also expose int32 numerator overflow.
+Each sample encodes its U/V in a packed VRAM word, including its mask bit.
+The test peaks at approximately 256 MiB of emulated VRAM at 16x.
+
+This finite reference does not establish arbitrary-geometry hardware parity,
+all enhanced subpixel samples, framebuffer feedback or perspective correction.
+Native rendering and actual sprite commands use their existing paths.
+
+The same small fixtures also exercise nonuniform perspective depths and the
+perspective sampler's invalid-reciprocal sentinel after valid operation.
+The test requires a valid perspective plane and observes the batch sentinel
+before comparing actual rasterizer output through GP0 readback. The floating
+perspective oracle excludes exact half ties; affine ties remain covered.
+
+Together the affine, perspective and fallback checks give 960 cases and
+573,720 compared samples. The native-grid reference does not certify every
+subpixel of an enhanced image.

@@ -67,6 +67,7 @@ def main():
             'serialization': [HERE/'serialization.c', ROOT/'mednafen/psx/gpu.c'],
             'decoder': [HERE/'decoder.c', ROOT/'mednafen/psx/gpu_polygon_sub.c',
                         ROOT/'pgxp/pgxp_gpu.c'],
+            'software': [HERE/'software.c', ROOT/'mednafen/psx/gpu_polygon_sub.c'],
         }
         for name, sources in targets.items():
             target = work/(name+('.exe' if os.name == 'nt' else ''))
